@@ -33,40 +33,6 @@ src/main/java/com/tranbac/chiptripbe/
     └── ai/             # AiUsage
 ```
 
-## Auth API
-
-| Method | Endpoint | Auth | Mô tả |
-|---|---|---|---|
-| POST | `/api/v1/auth/register` | Public | Đăng ký tài khoản |
-| POST | `/api/v1/auth/login` | Public | Đăng nhập |
-| POST | `/api/v1/auth/refresh` | Public | Làm mới access token |
-| POST | `/api/v1/auth/logout` | Bearer | Đăng xuất (revoke tokens) |
-
-### Request / Response mẫu
-
-**Login**
-```json
-POST /api/v1/auth/login
-{
-  "email": "user@example.com",
-  "password": "password123"
-}
-```
-
-```json
-{
-  "success": true,
-  "data": {
-    "accessToken": "eyJ...",
-    "refreshToken": "uuid-string",
-    "tokenType": "Bearer",
-    "expiresIn": 900,
-    "userId": 1,
-    "email": "user@example.com",
-    "fullName": "Nguyễn Văn A"
-  }
-}
-```
 
 ## Cài đặt & Chạy
 
@@ -105,35 +71,5 @@ JWT_SECRET=your-super-secret-key-at-least-32-chars
 ```bash
 ./mvnw spring-boot:run
 ```
-
-### 4. Swagger UI
-
-```
-http://localhost:8080/swagger-ui.html
-```
-
-## Cấu hình JWT
-
-| Tham số | Giá trị mặc định | Mô tả |
-|---|---|---|
-| `access-token-expiry-ms` | `900000` | Access token hết hạn sau 15 phút |
-| `refresh-token-expiry-ms` | `604800000` | Refresh token hết hạn sau 7 ngày |
-
-## Tài khoản Admin mặc định
-
-Được seed tự động khi khởi động lần đầu:
-
-| Field | Giá trị |
-|---|---|
-| Email | `admin@chiptrip.local` |
-| Password | `ChangeMe@123` |
-
-> Đổi mật khẩu ngay sau lần đăng nhập đầu tiên.
-
-## CORS
-
-Mặc định cho phép origins:
-- `http://localhost:3000`
-- `http://localhost:5173`
-
+ứng dụng sẽ chạy ở `http://localhost:8080`.
 Chỉnh trong `application.yml` → `app.cors.allowed-origins`.
