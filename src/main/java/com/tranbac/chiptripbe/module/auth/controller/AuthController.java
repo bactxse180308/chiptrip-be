@@ -3,6 +3,7 @@ package com.tranbac.chiptripbe.module.auth.controller;
 import com.tranbac.chiptripbe.common.response.ApiResponse;
 import com.tranbac.chiptripbe.common.security.UserPrincipal;
 import com.tranbac.chiptripbe.module.auth.dto.request.ForgotPasswordRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.GoogleLoginRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.LoginRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RefreshTokenRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RegisterRequest;
@@ -63,5 +64,10 @@ public class AuthController {
     public ResponseEntity<ApiResponse<Void>> resetPassword(@Valid @RequestBody ResetPasswordRequest request) {
         authService.resetPassword(request);
         return ResponseEntity.ok(ApiResponse.noContent());
+    }
+
+    @PostMapping("/google")
+    public ResponseEntity<ApiResponse<AuthResponse>> googleLogin(@Valid @RequestBody GoogleLoginRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(authService.googleLogin(request.getIdToken())));
     }
 }

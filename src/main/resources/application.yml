@@ -49,6 +49,9 @@ app:
     allowed-origins:
       - http://localhost:3000
       - http://localhost:5173
+  google:
+    client-id: ${GOOGLE_CLIENT_ID:}
+    client-secret: ${GOOGLE_CLIENT_SECRET:}
 
 springdoc:
   api-docs:

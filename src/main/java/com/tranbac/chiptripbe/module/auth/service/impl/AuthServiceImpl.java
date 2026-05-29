@@ -1,9 +1,11 @@
 package com.tranbac.chiptripbe.module.auth.service.impl;
 
+import com.tranbac.chiptripbe.common.enums.OAuthProvider;
 import com.tranbac.chiptripbe.common.enums.RoleName;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.common.mail.EmailService;
 import com.tranbac.chiptripbe.common.mail.MailProperties;
+import com.tranbac.chiptripbe.common.security.GoogleTokenVerifier;
 import com.tranbac.chiptripbe.common.security.JwtProvider;
 import com.tranbac.chiptripbe.module.auth.dto.request.ForgotPasswordRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.LoginRequest;
@@ -52,6 +54,7 @@ class AuthServiceImpl implements AuthService {
     private final PasswordEncoder passwordEncoder;
     private final EmailService emailService;
     private final MailProperties mailProperties;
+    private final GoogleTokenVerifier googleTokenVerifier;
 
     @Value("${app.jwt.access-token-expiry-ms}")
     private long accessTokenExpiryMs;
@@ -100,7 +103,7 @@ class AuthServiceImpl implements AuthService {
             throw AppException.forbidden("Tài khoản đã bị vô hiệu hóa");
         }
 
-        if (!user.getEmailVerified()) {
+        if (!user.getEmailVerified() && !user.isOAuthUser()) {
             throw AppException.forbidden("Vui lòng xác nhận email trước khi đăng nhập");
         }
 
@@ -219,6 +222,54 @@ class AuthServiceImpl implements AuthService {
         log.info("Password reset completed for userId={}", user.getId());
     }
 
+    @Override
+    @Transactional
+    public AuthResponse googleLogin(String idToken) {
+        log.info("Google OAuth login attempt");
+
+        GoogleTokenVerifier.GoogleUserInfo googleUser;
+        try {
+            googleUser = googleTokenVerifier.verify(idToken);
+        } catch (Exception e) {
+            log.warn("Google token verification failed: {}", e.getMessage());
+            throw AppException.unauthorized("Xác thực Google thất bại");
+        }
+
+        User user = userRepository
+                .findByOauthProviderAndOauthProviderId(OAuthProvider.GOOGLE, googleUser.sub())
+                .orElseGet(() -> {
+                    log.info("Creating new user via Google OAuth: email={}", googleUser.email());
+
+                    Role userRole = roleRepository.findByName(RoleName.USER)
+                            .orElseThrow(() -> AppException.notFound("Không tìm thấy role USER"));
+
+                    User newUser = User.builder()
+                            .email(googleUser.email())
+                            .passwordHash(null)
+                            .fullName(googleUser.name() != null ? googleUser.name() : "User")
+                            .avatarUrl(googleUser.picture() != null ? googleUser.picture() : null)
+                            .role(userRole)
+                            .oauthProvider(OAuthProvider.GOOGLE)
+                            .oauthProviderId(googleUser.sub())
+                            .emailVerified(true)
+                            .build();
+                    return userRepository.save(newUser);
+                });
+
+        if (!user.getIsActive()) {
+            throw AppException.forbidden("Tài khoản đã bị vô hiệu hóa");
+        }
+
+        user.setLastLoginAt(LocalDateTime.now());
+        userRepository.save(user);
+
+        String rawRefreshToken = UUID.randomUUID().toString();
+        saveRefreshToken(user, rawRefreshToken);
+
+        log.info("Google OAuth login success: userId={}", user.getId());
+        return buildAuthResponse(user, rawRefreshToken);
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────────
 
     private void sendEmailVerification(User user) {
@@ -259,6 +310,7 @@ class AuthServiceImpl implements AuthService {
                 .userId(user.getId())
                 .email(user.getEmail())
                 .fullName(user.getFullName())
+                .role(user.getRole().getName())
                 .build();
     }
 
