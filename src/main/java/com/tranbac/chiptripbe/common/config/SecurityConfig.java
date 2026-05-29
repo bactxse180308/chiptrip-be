@@ -1,6 +1,8 @@
 package com.tranbac.chiptripbe.common.config;
 
 import com.tranbac.chiptripbe.common.security.CorsProperties;
+import com.tranbac.chiptripbe.common.security.CustomAccessDeniedHandler;
+import com.tranbac.chiptripbe.common.security.CustomAuthenticationEntryPoint;
 import com.tranbac.chiptripbe.common.security.JwtAuthFilter;
 import com.tranbac.chiptripbe.common.security.UserDetailsServiceImpl;
 import lombok.RequiredArgsConstructor;
@@ -34,11 +36,16 @@ public class SecurityConfig {
     private final JwtAuthFilter jwtAuthFilter;
     private final UserDetailsServiceImpl userDetailsService;
     private final CorsProperties corsProperties;
+    private final CustomAuthenticationEntryPoint authenticationEntryPoint;
+    private final CustomAccessDeniedHandler accessDeniedHandler;
 
     private static final String[] PUBLIC_PATHS = {
             "/api/v1/auth/login",
             "/api/v1/auth/register",
             "/api/v1/auth/refresh",
+            "/api/v1/auth/verify-email",
+            "/api/v1/auth/forgot-password",
+            "/api/v1/auth/reset-password",
             "/swagger-ui/**",
             "/swagger-ui.html",
             "/api-docs/**"
@@ -54,11 +61,12 @@ public class SecurityConfig {
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(PUBLIC_PATHS).permitAll()
+                        .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )
                 .exceptionHandling(ex -> ex
-                        .authenticationEntryPoint((req, res, e) -> res.sendError(401, "Unauthorized"))
-                        .accessDeniedHandler((req, res, e) -> res.sendError(403, "Forbidden"))
+                        .authenticationEntryPoint(authenticationEntryPoint)
+                        .accessDeniedHandler(accessDeniedHandler)
                 );
         return http.build();
     }

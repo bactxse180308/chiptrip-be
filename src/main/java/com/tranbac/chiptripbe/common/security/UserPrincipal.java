@@ -29,4 +29,7 @@ public class UserPrincipal implements UserDetails {
     @Override public String getPassword() { return passwordHash; }
     @Override public String getUsername() { return email; }
     @Override public boolean isEnabled() { return active; }
+
+    // Used in @PreAuthorize("authentication.principal.toString() == #userId.toString()")
+    @Override public String toString() { return id.toString(); }
 }

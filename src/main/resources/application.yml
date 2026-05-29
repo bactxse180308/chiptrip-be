@@ -5,6 +5,19 @@ spring:
   config:
     import: optional:file:.env[.properties]
 
+  mail:
+    host: ${MAIL_HOST:smtp.gmail.com}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+
   datasource:
     url: ${DB_URL}
     username: ${DB_USERNAME}
@@ -26,6 +39,12 @@ app:
     secret: ${JWT_SECRET}
     access-token-expiry-ms: 900000
     refresh-token-expiry-ms: 604800000
+  mail:
+    from: ${MAIL_FROM:noreply@chiptrip.app}
+    verification-url: ${FRONTEND_URL:http://localhost:3000}/verify-email
+    reset-password-url: ${FRONTEND_URL:http://localhost:3000}/reset-password
+    verification-expiry-hours: 24
+    reset-password-expiry-hours: 1
   cors:
     allowed-origins:
       - http://localhost:3000

@@ -2,12 +2,20 @@ package com.tranbac.chiptripbe.module.auth.service.impl;
 
 import com.tranbac.chiptripbe.common.enums.RoleName;
 import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.common.mail.EmailService;
+import com.tranbac.chiptripbe.common.mail.MailProperties;
 import com.tranbac.chiptripbe.common.security.JwtProvider;
+import com.tranbac.chiptripbe.module.auth.dto.request.ForgotPasswordRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.LoginRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RefreshTokenRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RegisterRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.ResetPasswordRequest;
 import com.tranbac.chiptripbe.module.auth.dto.response.AuthResponse;
+import com.tranbac.chiptripbe.module.auth.entity.EmailVerificationToken;
+import com.tranbac.chiptripbe.module.auth.entity.PasswordResetToken;
 import com.tranbac.chiptripbe.module.auth.entity.RefreshToken;
+import com.tranbac.chiptripbe.module.auth.repository.EmailVerificationTokenRepository;
+import com.tranbac.chiptripbe.module.auth.repository.PasswordResetTokenRepository;
 import com.tranbac.chiptripbe.module.auth.repository.RefreshTokenRepository;
 import com.tranbac.chiptripbe.module.auth.service.AuthService;
 import com.tranbac.chiptripbe.module.user.entity.Role;
@@ -38,8 +46,12 @@ class AuthServiceImpl implements AuthService {
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final RefreshTokenRepository refreshTokenRepository;
+    private final EmailVerificationTokenRepository emailVerificationTokenRepository;
+    private final PasswordResetTokenRepository passwordResetTokenRepository;
     private final JwtProvider jwtProvider;
     private final PasswordEncoder passwordEncoder;
+    private final EmailService emailService;
+    private final MailProperties mailProperties;
 
     @Value("${app.jwt.access-token-expiry-ms}")
     private long accessTokenExpiryMs;
@@ -49,7 +61,7 @@ class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
-    public AuthResponse register(RegisterRequest request) {
+    public void register(RegisterRequest request) {
         log.info("Register attempt: email=[REDACTED]");
 
         if (userRepository.existsByEmail(request.getEmail())) {
@@ -69,10 +81,7 @@ class AuthServiceImpl implements AuthService {
         userRepository.save(user);
         log.info("New user registered: id={}", user.getId());
 
-        String rawRefreshToken = UUID.randomUUID().toString();
-        saveRefreshToken(user, rawRefreshToken);
-
-        return buildAuthResponse(user, rawRefreshToken);
+        sendEmailVerification(user);
     }
 
     @Override
@@ -89,6 +98,10 @@ class AuthServiceImpl implements AuthService {
 
         if (!user.getIsActive()) {
             throw AppException.forbidden("Tài khoản đã bị vô hiệu hóa");
+        }
+
+        if (!user.getEmailVerified()) {
+            throw AppException.forbidden("Vui lòng xác nhận email trước khi đăng nhập");
         }
 
         user.setLastLoginAt(LocalDateTime.now());
@@ -134,7 +147,95 @@ class AuthServiceImpl implements AuthService {
         log.info("Logout userId={} — revoked {} token(s)", userId, activeTokens.size());
     }
 
+    @Override
+    @Transactional
+    public void verifyEmail(String token) {
+        EmailVerificationToken verificationToken = emailVerificationTokenRepository.findByToken(token)
+                .orElseThrow(() -> AppException.badRequest("Token xác nhận không hợp lệ"));
+
+        if (verificationToken.getUsed()) {
+            throw AppException.badRequest("Token xác nhận đã được sử dụng");
+        }
+        if (verificationToken.getExpiresAt().isBefore(LocalDateTime.now())) {
+            throw AppException.badRequest("Token xác nhận đã hết hạn");
+        }
+
+        verificationToken.setUsed(true);
+        emailVerificationTokenRepository.save(verificationToken);
+
+        User user = verificationToken.getUser();
+        user.setEmailVerified(true);
+        userRepository.save(user);
+        log.info("Email verified for userId={}", user.getId());
+    }
+
+    @Override
+    @Transactional
+    public void forgotPassword(ForgotPasswordRequest request) {
+        userRepository.findByEmail(request.getEmail()).ifPresent(user -> {
+            passwordResetTokenRepository.invalidateAllByUserId(user.getId());
+
+            String token = UUID.randomUUID().toString();
+            LocalDateTime expiry = LocalDateTime.now()
+                    .plusHours(mailProperties.getResetPasswordExpiryHours());
+
+            passwordResetTokenRepository.save(PasswordResetToken.builder()
+                    .user(user)
+                    .token(token)
+                    .expiresAt(expiry)
+                    .build());
+
+            emailService.sendPasswordResetEmail(user.getEmail(), user.getFullName(), token);
+            log.info("Password reset requested for userId={}", user.getId());
+        });
+        // Always return success to prevent email enumeration
+    }
+
+    @Override
+    @Transactional
+    public void resetPassword(ResetPasswordRequest request) {
+        PasswordResetToken resetToken = passwordResetTokenRepository.findByToken(request.getToken())
+                .orElseThrow(() -> AppException.badRequest("Token đặt lại mật khẩu không hợp lệ"));
+
+        if (resetToken.getUsed()) {
+            throw AppException.badRequest("Token đặt lại mật khẩu đã được sử dụng");
+        }
+        if (resetToken.getExpiresAt().isBefore(LocalDateTime.now())) {
+            throw AppException.badRequest("Token đặt lại mật khẩu đã hết hạn");
+        }
+
+        resetToken.setUsed(true);
+        passwordResetTokenRepository.save(resetToken);
+
+        User user = resetToken.getUser();
+        user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
+        userRepository.save(user);
+
+        // Revoke all refresh tokens after password change
+        List<RefreshToken> activeTokens = refreshTokenRepository.findAllByUserId(user.getId());
+        activeTokens.forEach(t -> t.setRevoked(true));
+        refreshTokenRepository.saveAll(activeTokens);
+
+        log.info("Password reset completed for userId={}", user.getId());
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────────
+
+    private void sendEmailVerification(User user) {
+        emailVerificationTokenRepository.invalidateAllByUserId(user.getId());
+
+        String token = UUID.randomUUID().toString();
+        LocalDateTime expiry = LocalDateTime.now()
+                .plusHours(mailProperties.getVerificationExpiryHours());
+
+        emailVerificationTokenRepository.save(EmailVerificationToken.builder()
+                .user(user)
+                .token(token)
+                .expiresAt(expiry)
+                .build());
+
+        emailService.sendVerificationEmail(user.getEmail(), user.getFullName(), token);
+    }
 
     private void saveRefreshToken(User user, String rawToken) {
         LocalDateTime expiry = LocalDateTime.now().plusSeconds(refreshTokenExpiryMs / 1000);
