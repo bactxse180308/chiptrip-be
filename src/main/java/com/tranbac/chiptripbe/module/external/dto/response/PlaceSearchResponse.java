@@ -1,4 +1,4 @@
-package com.tranbac.chiptripbe.module.external.dto;
+package com.tranbac.chiptripbe.module.external.dto.response;
 
 import lombok.Builder;
 import lombok.Getter;

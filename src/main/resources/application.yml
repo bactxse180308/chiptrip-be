@@ -45,6 +45,7 @@ app:
     reset-password-url: ${FRONTEND_URL:http://localhost:3000}/reset-password
     verification-expiry-hours: 24
     reset-password-expiry-hours: 1
+    otp-expiry-minutes: 5
   cors:
     allowed-origins:
       - http://localhost:3000

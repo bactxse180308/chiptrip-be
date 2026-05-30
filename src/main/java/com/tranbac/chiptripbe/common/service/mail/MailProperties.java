@@ -1,4 +1,4 @@
-package com.tranbac.chiptripbe.common.mail;
+package com.tranbac.chiptripbe.common.service.mail;
 
 import lombok.Getter;
 import lombok.Setter;
@@ -15,4 +15,5 @@ public class MailProperties {
     private String resetPasswordUrl;
     private int verificationExpiryHours = 24;
     private int resetPasswordExpiryHours = 1;
+    private int otpExpiryMinutes = 5;
 }

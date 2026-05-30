@@ -1,7 +1,7 @@
 package com.tranbac.chiptripbe.module.user.service.impl;
 
 import com.tranbac.chiptripbe.common.exception.AppException;
-import com.tranbac.chiptripbe.common.mail.EmailService;
+import com.tranbac.chiptripbe.common.service.mail.EmailService;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
 import com.tranbac.chiptripbe.module.auth.entity.EmailVerificationToken;
 import com.tranbac.chiptripbe.module.auth.entity.RefreshToken;

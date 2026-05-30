@@ -1,11 +1,10 @@
-package com.tranbac.chiptripbe.module.external.dto;
+package com.tranbac.chiptripbe.module.external.dto.response;
 
 import lombok.Builder;
 import lombok.Getter;
 
 import java.time.LocalDate;
 import java.util.List;
-import java.util.Map;
 
 @Getter
 @Builder

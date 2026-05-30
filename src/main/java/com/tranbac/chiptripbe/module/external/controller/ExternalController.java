@@ -1,8 +1,8 @@
 package com.tranbac.chiptripbe.module.external.controller;
 
 import com.tranbac.chiptripbe.common.response.ApiResponse;
-import com.tranbac.chiptripbe.module.external.dto.PlaceSearchResponse;
-import com.tranbac.chiptripbe.module.external.dto.WeatherResponse;
+import com.tranbac.chiptripbe.module.external.dto.response.PlaceSearchResponse;
+import com.tranbac.chiptripbe.module.external.dto.response.WeatherResponse;
 import com.tranbac.chiptripbe.module.external.service.ExternalApiService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;

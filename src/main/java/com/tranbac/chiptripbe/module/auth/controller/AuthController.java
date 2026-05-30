@@ -8,6 +8,9 @@ import com.tranbac.chiptripbe.module.auth.dto.request.LoginRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RefreshTokenRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RegisterRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.ResetPasswordRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.ResetPasswordWithOtpRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.SendOtpRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.VerifyOtpRequest;
 import com.tranbac.chiptripbe.module.auth.dto.response.AuthResponse;
 import com.tranbac.chiptripbe.module.auth.service.AuthService;
 import jakarta.validation.Valid;
@@ -29,7 +32,7 @@ public class AuthController {
     public ResponseEntity<ApiResponse<Void>> register(@Valid @RequestBody RegisterRequest request) {
         authService.register(request);
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(new ApiResponse<>(true, "Đăng ký thành công. Vui lòng kiểm tra email để xác nhận tài khoản.", null, null, java.time.Instant.now()));
+                .body(new ApiResponse<>(true, "Đăng ký thành công. Vui lòng kiểm tra email để nhận mã xác nhận.", null, null, java.time.Instant.now()));
     }
 
     @PostMapping("/login")
@@ -48,10 +51,16 @@ public class AuthController {
         return ResponseEntity.ok(ApiResponse.noContent());
     }
 
-    @GetMapping("/verify-email")
-    public ResponseEntity<ApiResponse<Void>> verifyEmail(@RequestParam String token) {
-        authService.verifyEmail(token);
+    @PostMapping("/send-otp")
+    public ResponseEntity<ApiResponse<Void>> sendOtp(@Valid @RequestBody SendOtpRequest request) {
+        authService.sendOtp(request);
         return ResponseEntity.ok(ApiResponse.noContent());
+    }
+
+    @PostMapping("/verify-otp")
+    public ResponseEntity<ApiResponse<Void>> verifyOtp(@Valid @RequestBody VerifyOtpRequest request) {
+        authService.verifyOtp(request);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Xác nhận thành công"));
     }
 
     @PostMapping("/forgot-password")
@@ -64,6 +73,12 @@ public class AuthController {
     public ResponseEntity<ApiResponse<Void>> resetPassword(@Valid @RequestBody ResetPasswordRequest request) {
         authService.resetPassword(request);
         return ResponseEntity.ok(ApiResponse.noContent());
+    }
+
+    @PostMapping("/reset-password-with-otp")
+    public ResponseEntity<ApiResponse<Void>> resetPasswordWithOtp(@Valid @RequestBody ResetPasswordWithOtpRequest request) {
+        authService.resetPasswordWithOtp(request);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Đặt lại mật khẩu thành công"));
     }
 
     @PostMapping("/google")

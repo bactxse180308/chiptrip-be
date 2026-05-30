@@ -1,7 +1,7 @@
 package com.tranbac.chiptripbe.module.external.service;
 
-import com.tranbac.chiptripbe.module.external.dto.PlaceSearchResponse;
-import com.tranbac.chiptripbe.module.external.dto.WeatherResponse;
+import com.tranbac.chiptripbe.module.external.dto.response.PlaceSearchResponse;
+import com.tranbac.chiptripbe.module.external.dto.response.WeatherResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
