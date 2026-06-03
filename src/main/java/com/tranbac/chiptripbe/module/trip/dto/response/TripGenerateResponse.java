@@ -4,6 +4,7 @@ import com.tranbac.chiptripbe.common.enums.ActivityType;
 import com.tranbac.chiptripbe.common.enums.ChecklistCategory;
 import lombok.Builder;
 import lombok.Getter;
+
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -12,7 +13,7 @@ import java.util.List;
 
 @Getter
 @Builder
-public class TripDetailResponse {
+public class TripGenerateResponse {
 
     private Long id;
     private String title;
@@ -24,21 +25,9 @@ public class TripDetailResponse {
     private Long budgetVnd;
     private String styles;
     private LocalDateTime createdAt;
-    private LocalDateTime updatedAt;
     private Long totalCostVnd;
-    private String shareToken;
-
-    private UserInfo user;
     private List<DayDetail> days;
-    private List<ChecklistItemDetail> checklist;
-
-    @Getter
-    @Builder
-    public static class UserInfo {
-        private Long id;
-        private String email;
-        private String fullName;
-    }
+    private List<ChecklistDetail> checklist;
 
     @Getter
     @Builder
@@ -68,7 +57,7 @@ public class TripDetailResponse {
 
     @Getter
     @Builder
-    public static class ChecklistItemDetail {
+    public static class ChecklistDetail {
         private Long id;
         private String category;
         private String name;

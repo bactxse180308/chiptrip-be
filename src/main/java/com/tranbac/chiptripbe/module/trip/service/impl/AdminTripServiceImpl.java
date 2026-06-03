@@ -85,11 +85,11 @@ class AdminTripServiceImpl implements AdminTripService {
         List<TripDetailResponse.ChecklistItemDetail> checklistDetails = checklist.stream()
                 .map(c -> TripDetailResponse.ChecklistItemDetail.builder()
                         .id(c.getId())
-                        .category(c.getCategory())
+                        .category(c.getCategory() != null ? c.getCategory().name() : null)
                         .name(c.getName())
                         .isChecked(c.getIsChecked())
                         .displayOrder(c.getDisplayOrder())
-                        .build()).toList();
+                        .build()).collect(java.util.stream.Collectors.toList());
 
         return TripDetailResponse.builder()
                 .id(trip.getId())

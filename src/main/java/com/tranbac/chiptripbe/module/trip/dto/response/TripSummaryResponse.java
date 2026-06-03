@@ -21,4 +21,6 @@ public class TripSummaryResponse {
     private Long budgetVnd;
     private String styles;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
+    private Long totalCostVnd;
 }

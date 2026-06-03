@@ -3,6 +3,8 @@ package com.tranbac.chiptripbe.module.user.controller;
 import com.tranbac.chiptripbe.common.response.ApiResponse;
 import com.tranbac.chiptripbe.common.response.PageMeta;
 import com.tranbac.chiptripbe.module.user.dto.request.AdminUpdateUserRequest;
+import com.tranbac.chiptripbe.module.user.dto.request.AssignRoleRequest;
+import com.tranbac.chiptripbe.module.user.dto.request.GrantCreditsRequest;
 import com.tranbac.chiptripbe.module.user.dto.response.AdminUserDetailResponse;
 import com.tranbac.chiptripbe.module.user.dto.response.UserResponse;
 import com.tranbac.chiptripbe.module.user.service.UserService;
@@ -62,11 +64,47 @@ public class AdminUserController {
         return ResponseEntity.ok(ApiResponse.ok(userService.adminUpdateUser(id, request)));
     }
 
+    @Operation(summary = "Kích hoạt tài khoản")
+    @SecurityRequirement(name = "bearerAuth")
+    @PatchMapping("/{id}/activate")
+    public ResponseEntity<ApiResponse<Void>> activateUser(@PathVariable Long id) {
+        userService.adminActivateUser(id);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Đã kích hoạt tài khoản"));
+    }
+
     @Operation(summary = "Vô hiệu hoá tài khoản (soft delete)")
     @SecurityRequirement(name = "bearerAuth")
     @PatchMapping("/{id}/deactivate")
     public ResponseEntity<ApiResponse<Void>> deactivateUser(@PathVariable Long id) {
         userService.adminDeactivateUser(id);
-        return ResponseEntity.ok(ApiResponse.noContent());
+        return ResponseEntity.ok(ApiResponse.ok(null, "Đã vô hiệu hoá tài khoản"));
+    }
+
+    @Operation(summary = "Cộng lượt AI cho user")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/grant-credits")
+    public ResponseEntity<ApiResponse<UserResponse>> grantCredits(
+            @PathVariable Long id,
+            @Valid @RequestBody GrantCreditsRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(userService.adminGrantCredits(id, request)));
+    }
+
+    @Operation(summary = "Gán vai trò cho user")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/roles")
+    public ResponseEntity<ApiResponse<UserResponse>> assignRole(
+            @PathVariable Long id,
+            @Valid @RequestBody AssignRoleRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(userService.adminAssignRole(id, request)));
+    }
+
+    @Operation(summary = "Gỡ vai trò của user (reset về USER)")
+    @SecurityRequirement(name = "bearerAuth")
+    @DeleteMapping("/{id}/roles/{roleId}")
+    public ResponseEntity<ApiResponse<Void>> removeRole(
+            @PathVariable Long id,
+            @PathVariable Long roleId) {
+        userService.adminRemoveRole(id, roleId);
+        return ResponseEntity.ok(ApiResponse.ok(null, "Đã gỡ vai trò"));
     }
 }

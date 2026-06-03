@@ -1,20 +1,27 @@
 package com.tranbac.chiptripbe.module.auth.service.impl;
 
+import com.tranbac.chiptripbe.common.enums.OAuthProvider;
 import com.tranbac.chiptripbe.common.enums.RoleName;
 import com.tranbac.chiptripbe.common.exception.AppException;
-import com.tranbac.chiptripbe.common.mail.EmailService;
-import com.tranbac.chiptripbe.common.mail.MailProperties;
+import com.tranbac.chiptripbe.common.service.mail.EmailService;
+import com.tranbac.chiptripbe.common.service.mail.MailProperties;
+import com.tranbac.chiptripbe.common.security.GoogleTokenVerifier;
 import com.tranbac.chiptripbe.common.security.JwtProvider;
 import com.tranbac.chiptripbe.module.auth.dto.request.ForgotPasswordRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.LoginRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RefreshTokenRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.RegisterRequest;
 import com.tranbac.chiptripbe.module.auth.dto.request.ResetPasswordRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.ResetPasswordWithOtpRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.SendOtpRequest;
+import com.tranbac.chiptripbe.module.auth.dto.request.VerifyOtpRequest;
 import com.tranbac.chiptripbe.module.auth.dto.response.AuthResponse;
 import com.tranbac.chiptripbe.module.auth.entity.EmailVerificationToken;
+import com.tranbac.chiptripbe.module.auth.entity.OtpCode;
 import com.tranbac.chiptripbe.module.auth.entity.PasswordResetToken;
 import com.tranbac.chiptripbe.module.auth.entity.RefreshToken;
 import com.tranbac.chiptripbe.module.auth.repository.EmailVerificationTokenRepository;
+import com.tranbac.chiptripbe.module.auth.repository.OtpCodeRepository;
 import com.tranbac.chiptripbe.module.auth.repository.PasswordResetTokenRepository;
 import com.tranbac.chiptripbe.module.auth.repository.RefreshTokenRepository;
 import com.tranbac.chiptripbe.module.auth.service.AuthService;
@@ -32,6 +39,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.Base64;
 import java.util.List;
@@ -48,10 +56,14 @@ class AuthServiceImpl implements AuthService {
     private final RefreshTokenRepository refreshTokenRepository;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
     private final PasswordResetTokenRepository passwordResetTokenRepository;
+    private final OtpCodeRepository otpCodeRepository;
     private final JwtProvider jwtProvider;
     private final PasswordEncoder passwordEncoder;
     private final EmailService emailService;
     private final MailProperties mailProperties;
+    private final GoogleTokenVerifier googleTokenVerifier;
+
+    private final SecureRandom secureRandom = new SecureRandom();
 
     @Value("${app.jwt.access-token-expiry-ms}")
     private long accessTokenExpiryMs;
@@ -81,7 +93,7 @@ class AuthServiceImpl implements AuthService {
         userRepository.save(user);
         log.info("New user registered: id={}", user.getId());
 
-        sendEmailVerification(user);
+        sendEmailVerificationOtp(user);
     }
 
     @Override
@@ -98,10 +110,6 @@ class AuthServiceImpl implements AuthService {
 
         if (!user.getIsActive()) {
             throw AppException.forbidden("Tài khoản đã bị vô hiệu hóa");
-        }
-
-        if (!user.getEmailVerified()) {
-            throw AppException.forbidden("Vui lòng xác nhận email trước khi đăng nhập");
         }
 
         user.setLastLoginAt(LocalDateTime.now());
@@ -149,24 +157,111 @@ class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
-    public void verifyEmail(String token) {
-        EmailVerificationToken verificationToken = emailVerificationTokenRepository.findByToken(token)
-                .orElseThrow(() -> AppException.badRequest("Token xác nhận không hợp lệ"));
-
-        if (verificationToken.getUsed()) {
-            throw AppException.badRequest("Token xác nhận đã được sử dụng");
-        }
-        if (verificationToken.getExpiresAt().isBefore(LocalDateTime.now())) {
-            throw AppException.badRequest("Token xác nhận đã hết hạn");
+    public void sendOtp(SendOtpRequest request) {
+        OtpCode.Purpose purpose;
+        try {
+            purpose = OtpCode.Purpose.valueOf(request.getPurpose().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw AppException.badRequest("Loại OTP không hợp lệ");
         }
 
-        verificationToken.setUsed(true);
-        emailVerificationTokenRepository.save(verificationToken);
+        if (purpose == OtpCode.Purpose.EMAIL_VERIFICATION) {
+            User user = userRepository.findByEmail(request.getEmail())
+                    .orElseThrow(() -> AppException.notFound("Không tìm thấy tài khoản với email này"));
+            if (user.getEmailVerified() && !user.isOAuthUser()) {
+                throw AppException.conflict("Email đã được xác nhận trước đó");
+            }
+            createAndSendOtp(user.getEmail(), user.getFullName(), purpose);
 
-        User user = verificationToken.getUser();
-        user.setEmailVerified(true);
+        } else if (purpose == OtpCode.Purpose.PASSWORD_RESET) {
+            userRepository.findByEmail(request.getEmail()).ifPresent(user -> {
+                createAndSendOtp(user.getEmail(), user.getFullName(), purpose);
+            });
+        }
+    }
+
+    @Override
+    @Transactional
+    public void verifyOtp(VerifyOtpRequest request) {
+        OtpCode.Purpose purpose;
+        try {
+            purpose = OtpCode.Purpose.valueOf(request.getPurpose().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw AppException.badRequest("Loại OTP không hợp lệ");
+        }
+
+        OtpCode otp = otpCodeRepository.findTopByEmailAndPurposeOrderByCreatedAtDesc(request.getEmail(), purpose)
+                .orElseThrow(() -> AppException.badRequest("Mã OTP không tồn tại"));
+
+        if (otp.getUsed()) {
+            throw AppException.badRequest("Mã OTP đã được sử dụng");
+        }
+        if (otp.isExpired()) {
+            throw AppException.badRequest("Mã OTP đã hết hạn");
+        }
+        if (otp.getAttempts() >= 5) {
+            throw AppException.badRequest("Đã nhập sai quá nhiều lần. Vui lòng yêu cầu mã mới.");
+        }
+
+        if (!hashOtp(request.getOtp()).equals(otp.getOtpHash())) {
+            otp.setAttempts(otp.getAttempts() + 1);
+            otpCodeRepository.save(otp);
+            int remaining = 5 - otp.getAttempts();
+            throw AppException.badRequest("Mã OTP không đúng. Còn " + remaining + " lần thử.");
+        }
+
+        otp.setUsed(true);
+        otpCodeRepository.save(otp);
+
+        if (purpose == OtpCode.Purpose.EMAIL_VERIFICATION) {
+            User user = userRepository.findByEmail(request.getEmail())
+                    .orElseThrow(() -> AppException.notFound("Không tìm thấy tài khoản"));
+            user.setEmailVerified(true);
+            userRepository.save(user);
+            emailVerificationTokenRepository.invalidateAllByUserId(user.getId());
+            log.info("Email verified via OTP for userId={}", user.getId());
+        } else {
+            log.info("OTP verified for purpose: {} email={}", purpose, "[REDACTED]");
+        }
+    }
+
+    @Override
+    @Transactional
+    public void resetPasswordWithOtp(ResetPasswordWithOtpRequest request) {
+        OtpCode otp = otpCodeRepository
+                .findTopByEmailAndPurposeOrderByCreatedAtDesc(request.getEmail(), OtpCode.Purpose.PASSWORD_RESET)
+                .orElseThrow(() -> AppException.badRequest("Mã OTP không tồn tại"));
+
+        if (otp.getUsed()) {
+            throw AppException.badRequest("Mã OTP đã được sử dụng");
+        }
+        if (otp.isExpired()) {
+            throw AppException.badRequest("Mã OTP đã hết hạn");
+        }
+        if (otp.getAttempts() >= 5) {
+            throw AppException.badRequest("Đã nhập sai quá nhiều lần. Vui lòng yêu cầu mã mới.");
+        }
+
+        if (!hashOtp(request.getOtp()).equals(otp.getOtpHash())) {
+            otp.setAttempts(otp.getAttempts() + 1);
+            otpCodeRepository.save(otp);
+            int remaining = 5 - otp.getAttempts();
+            throw AppException.badRequest("Mã OTP không đúng. Còn " + remaining + " lần thử.");
+        }
+
+        otp.setUsed(true);
+        otpCodeRepository.save(otp);
+
+        User user = userRepository.findByEmail(request.getEmail())
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy tài khoản"));
+        user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
         userRepository.save(user);
-        log.info("Email verified for userId={}", user.getId());
+
+        List<RefreshToken> activeTokens = refreshTokenRepository.findAllByUserId(user.getId());
+        activeTokens.forEach(t -> t.setRevoked(true));
+        refreshTokenRepository.saveAll(activeTokens);
+
+        log.info("Password reset via OTP for userId={}", user.getId());
     }
 
     @Override
@@ -219,22 +314,92 @@ class AuthServiceImpl implements AuthService {
         log.info("Password reset completed for userId={}", user.getId());
     }
 
+    @Override
+    @Transactional
+    public AuthResponse googleLogin(String idToken) {
+        log.info("Google OAuth login attempt");
+
+        GoogleTokenVerifier.GoogleUserInfo googleUser;
+        try {
+            googleUser = googleTokenVerifier.verify(idToken);
+        } catch (Exception e) {
+            log.warn("Google token verification failed: {}", e.getMessage());
+            throw AppException.unauthorized("Xác thực Google thất bại");
+        }
+
+        User user = userRepository
+                .findByOauthProviderAndOauthProviderId(OAuthProvider.GOOGLE, googleUser.sub())
+                .orElseGet(() -> {
+                    log.info("Creating new user via Google OAuth: email={}", googleUser.email());
+
+                    Role userRole = roleRepository.findByName(RoleName.USER)
+                            .orElseThrow(() -> AppException.notFound("Không tìm thấy role USER"));
+
+                    User newUser = User.builder()
+                            .email(googleUser.email())
+                            .passwordHash(null)
+                            .fullName(googleUser.name() != null ? googleUser.name() : "User")
+                            .avatarUrl(googleUser.picture() != null ? googleUser.picture() : null)
+                            .role(userRole)
+                            .oauthProvider(OAuthProvider.GOOGLE)
+                            .oauthProviderId(googleUser.sub())
+                            .emailVerified(true)
+                            .build();
+                    return userRepository.save(newUser);
+                });
+
+        if (!user.getIsActive()) {
+            throw AppException.forbidden("Tài khoản đã bị vô hiệu hóa");
+        }
+
+        user.setLastLoginAt(LocalDateTime.now());
+        userRepository.save(user);
+
+        String rawRefreshToken = UUID.randomUUID().toString();
+        saveRefreshToken(user, rawRefreshToken);
+
+        log.info("Google OAuth login success: userId={}", user.getId());
+        return buildAuthResponse(user, rawRefreshToken);
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────────
 
-    private void sendEmailVerification(User user) {
-        emailVerificationTokenRepository.invalidateAllByUserId(user.getId());
+    private void sendEmailVerificationOtp(User user) {
+        createAndSendOtp(user.getEmail(), user.getFullName(), OtpCode.Purpose.EMAIL_VERIFICATION);
+    }
 
-        String token = UUID.randomUUID().toString();
-        LocalDateTime expiry = LocalDateTime.now()
-                .plusHours(mailProperties.getVerificationExpiryHours());
+    private void createAndSendOtp(String email, String fullName, OtpCode.Purpose purpose) {
+        otpCodeRepository.invalidateAllByEmailAndPurpose(email, purpose);
 
-        emailVerificationTokenRepository.save(EmailVerificationToken.builder()
-                .user(user)
-                .token(token)
+        String rawOtp = generateSecureOtp();
+        String otpHash = hashOtp(rawOtp);
+        LocalDateTime expiry = LocalDateTime.now().plusMinutes(mailProperties.getOtpExpiryMinutes());
+
+        OtpCode otpCode = OtpCode.builder()
+                .email(email)
+                .purpose(purpose)
+                .otpHash(otpHash)
                 .expiresAt(expiry)
-                .build());
+                .build();
+        otpCodeRepository.save(otpCode);
 
-        emailService.sendVerificationEmail(user.getEmail(), user.getFullName(), token);
+        emailService.sendOtpEmail(email, fullName, rawOtp, mailProperties.getOtpExpiryMinutes(), purpose.name());
+        log.info("OTP created and sent for purpose: {} to email: [REDACTED]", purpose);
+    }
+
+    private String generateSecureOtp() {
+        int otp = 100000 + secureRandom.nextInt(900000);
+        return String.valueOf(otp);
+    }
+
+    private String hashOtp(String rawOtp) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(rawOtp.getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(bytes);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 
     private void saveRefreshToken(User user, String rawToken) {
@@ -259,6 +424,7 @@ class AuthServiceImpl implements AuthService {
                 .userId(user.getId())
                 .email(user.getEmail())
                 .fullName(user.getFullName())
+                .role(user.getRole().getName())
                 .build();
     }
 
