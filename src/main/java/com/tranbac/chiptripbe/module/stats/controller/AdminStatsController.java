@@ -36,30 +36,30 @@ public class AdminStatsController {
         return ResponseEntity.ok(ApiResponse.ok(statsService.getDashboard()));
     }
 
-    @Operation(summary = "Số user đăng ký theo ngày")
+    @Operation(summary = "Số user đăng ký theo ngày (from/to tùy chọn, mặc định lấy tất cả)")
     @SecurityRequirement(name = "bearerAuth")
     @GetMapping("/users")
     public ResponseEntity<ApiResponse<List<DailyCountResponse>>> getUserStats(
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
         return ResponseEntity.ok(ApiResponse.ok(statsService.getUserRegistrationsByDay(from, to)));
     }
 
-    @Operation(summary = "Số trip được tạo theo ngày")
+    @Operation(summary = "Số trip được tạo theo ngày (from/to tùy chọn, mặc định lấy tất cả)")
     @SecurityRequirement(name = "bearerAuth")
     @GetMapping("/trips")
     public ResponseEntity<ApiResponse<List<DailyCountResponse>>> getTripStats(
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
         return ResponseEntity.ok(ApiResponse.ok(statsService.getTripCreationsByDay(from, to)));
     }
 
-    @Operation(summary = "Chi phí AI theo provider và tháng")
+    @Operation(summary = "Chi phí AI theo provider và tháng (from/to tùy chọn, mặc định lấy tất cả)")
     @SecurityRequirement(name = "bearerAuth")
     @GetMapping("/ai-cost")
     public ResponseEntity<ApiResponse<List<AiCostByProviderMonthResponse>>> getAiCostStats(
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
         return ResponseEntity.ok(ApiResponse.ok(statsService.getAiCostByProviderMonth(from, to)));
     }
 }

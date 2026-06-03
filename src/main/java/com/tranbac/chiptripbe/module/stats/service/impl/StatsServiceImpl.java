@@ -25,6 +25,8 @@ import java.util.List;
 @Transactional(readOnly = true)
 class StatsServiceImpl implements StatsService {
 
+    private static final LocalDate DATE_MIN = LocalDate.of(2000, 1, 1);
+
     private final UserRepository userRepository;
     private final TripRepository tripRepository;
     private final AiUsageRepository aiUsageRepository;
@@ -53,8 +55,8 @@ class StatsServiceImpl implements StatsService {
 
     @Override
     public List<DailyCountResponse> getUserRegistrationsByDay(LocalDate from, LocalDate to) {
-        LocalDateTime start = from.atStartOfDay();
-        LocalDateTime end = to.atTime(LocalTime.MAX);
+        LocalDateTime start = (from != null ? from : DATE_MIN).atStartOfDay();
+        LocalDateTime end = (to != null ? to : LocalDate.now()).atTime(LocalTime.MAX);
         return userRepository.countRegistrationsByDay(start, end).stream()
                 .map(row -> DailyCountResponse.builder()
                         .date(String.format("%04d-%02d-%02d",
@@ -68,8 +70,8 @@ class StatsServiceImpl implements StatsService {
 
     @Override
     public List<DailyCountResponse> getTripCreationsByDay(LocalDate from, LocalDate to) {
-        LocalDateTime start = from.atStartOfDay();
-        LocalDateTime end = to.atTime(LocalTime.MAX);
+        LocalDateTime start = (from != null ? from : DATE_MIN).atStartOfDay();
+        LocalDateTime end = (to != null ? to : LocalDate.now()).atTime(LocalTime.MAX);
         return tripRepository.countCreationsByDay(start, end).stream()
                 .map(row -> DailyCountResponse.builder()
                         .date(String.format("%04d-%02d-%02d",
@@ -83,8 +85,8 @@ class StatsServiceImpl implements StatsService {
 
     @Override
     public List<AiCostByProviderMonthResponse> getAiCostByProviderMonth(LocalDate from, LocalDate to) {
-        LocalDateTime start = from.atStartOfDay();
-        LocalDateTime end = to.atTime(LocalTime.MAX);
+        LocalDateTime start = (from != null ? from : DATE_MIN).atStartOfDay();
+        LocalDateTime end = (to != null ? to : LocalDate.now()).atTime(LocalTime.MAX);
         return aiUsageRepository.aggregateCostByProviderMonth(start, end).stream()
                 .map(row -> AiCostByProviderMonthResponse.builder()
                         .provider((String) row[0])
