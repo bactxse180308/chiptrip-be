@@ -53,6 +53,28 @@ app:
   google:
     client-id: ${GOOGLE_CLIENT_ID:}
     client-secret: ${GOOGLE_CLIENT_SECRET:}
+  ai:
+    gemini:
+      api-key: ${GEMINI_API_KEY}
+      model: gemini-2.5-flash
+      base-url: https://generativelanguage.googleapis.com/v1beta
+    max-retries: 2
+    timeout-seconds: 60
+    pricing:
+      input-usd-per-1m: 0.075
+      output-usd-per-1m: 0.30
+  goong:
+    api-key: ${GOONG_API_KEY}
+    base-url: https://rsapi.goong.io
+    timeout-seconds: 5
+  serpapi:
+    api-key: ${SERPAPI_API_KEY:}
+    base-url: https://serpapi.com
+    timeout-seconds: 10
+    enabled: true
+    cache-ttl-days: 30
+  external:
+    openweather-api-key: ${OPENWEATHER_API_KEY:}
 
 springdoc:
   api-docs:
@@ -66,3 +88,10 @@ logging:
     com.tranbac.chiptripbe: DEBUG
     org.springframework.security: WARN
     org.hibernate.SQL: WARN
+    # suppress JVM-level noise
+    io.netty: WARN
+    reactor.netty: WARN
+    # suppress Tomcat "invalid cookie" info spam
+    org.apache.tomcat.util.http.parser.Cookie: ERROR
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%15.15thread] %logger{36} - %msg%n"

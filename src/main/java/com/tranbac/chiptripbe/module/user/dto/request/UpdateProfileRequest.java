@@ -15,4 +15,7 @@ public class UpdateProfileRequest {
 
     @Size(max = 500)
     private String avatarUrl;
+
+    @Size(max = 500)
+    private String preferences;
 }

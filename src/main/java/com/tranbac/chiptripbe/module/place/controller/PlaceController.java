@@ -1,0 +1,114 @@
+package com.tranbac.chiptripbe.module.place.controller;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.common.response.ApiResponse;
+import com.tranbac.chiptripbe.module.place.dto.PlaceDto;
+import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
+import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Endpoint lấy chi tiết địa điểm đã enrich (rating, ảnh, giờ mở cửa).
+ * Frontend gọi lazy khi user mở chi tiết một activity trong lịch trình.
+ */
+@Tag(name = "Places", description = "Thông tin địa điểm đã enrich từ Goong + SerpApi")
+@RestController
+@RequestMapping("/api/v1/places")
+@RequiredArgsConstructor
+public class PlaceController {
+
+    private final PlaceCacheRepository placeCacheRepository;
+    private final ObjectMapper objectMapper;
+
+    @Operation(summary = "Lấy chi tiết địa điểm theo cache ID")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/{id}")
+    public ApiResponse<PlaceDto> getPlace(@PathVariable Long id) {
+        PlaceCache place = placeCacheRepository.findById(id)
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy địa điểm"));
+        return ApiResponse.ok(toDto(place));
+    }
+
+    private PlaceDto toDto(PlaceCache p) {
+        return PlaceDto.builder()
+                .id(p.getId())
+                .name(p.getName())
+                .address(p.getAddress())
+                .latitude(p.getLatitude())
+                .longitude(p.getLongitude())
+                .rating(p.getRating())
+                .reviewCount(p.getReviewCount())
+                .openState(p.getOpenState())
+                .openingHours(parseOpeningHours(p.getOpeningHoursJson()))
+                .photos(parsePhotos(p.getPhotosJson()))
+                .reviews(parseReviews(p.getReviewsJson()))
+                .phone(p.getPhone())
+                .website(p.getWebsite())
+                .build();
+    }
+
+    private List<PlaceDto.OpeningHour> parseOpeningHours(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            List<Map<String, String>> raw = objectMapper.readValue(json, new TypeReference<>() {});
+            return raw.stream()
+                    .map(m -> PlaceDto.OpeningHour.builder()
+                            .day(m.get("day"))
+                            .hours(m.get("hours"))
+                            .build())
+                    .toList();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private List<PlaceDto.PlacePhoto> parsePhotos(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            List<Map<String, String>> raw = objectMapper.readValue(json, new TypeReference<>() {});
+            return raw.stream()
+                    .map(m -> PlaceDto.PlacePhoto.builder()
+                            .url(m.get("url"))
+                            .thumbnail(m.getOrDefault("thumbnail", m.get("url")))
+                            .build())
+                    .toList();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private List<PlaceDto.PlaceReview> parseReviews(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            List<Map<String, Object>> raw = objectMapper.readValue(json, new TypeReference<>() {});
+            return raw.stream()
+                    .map(m -> {
+                        Object ratingVal = m.get("rating");
+                        BigDecimal rating = null;
+                        if (ratingVal instanceof Number) {
+                            rating = BigDecimal.valueOf(((Number) ratingVal).doubleValue());
+                        }
+                        return PlaceDto.PlaceReview.builder()
+                                .author((String) m.get("author"))
+                                .avatar((String) m.get("avatar"))
+                                .rating(rating)
+                                .time((String) m.get("time"))
+                                .text((String) m.get("text"))
+                                .build();
+                    })
+                    .toList();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+}

@@ -116,22 +116,32 @@
 ## 5. Domain Model (lược đồ chính)
 
 ```
-User (1) ──< (n) Trip (1) ──< (n) Day (1) ──< (n) Activity
-                  │
-                  └──< (n) ChecklistItem
-
-User (1) ──< (n) AiUsage
+Role (1) ──< (n) User (1) ──< (n) Trip (1) ──< (n) Day (1) ──< (n) Activity
+                   │                │
+                   │                └──< (n) ChecklistItem
+                   └──< (n) AiUsage
 ```
 
 ### Bảng & trường chính
 
+**Role**
+- `id` (Long, PK)
+- `name` (string, unique) — vd `ROLE_USER`, `ROLE_ADMIN`
+
 **User**
-- `id` (UUID, PK)
+- `id` (Long, PK)
 - `email` (unique, indexed)
 - `passwordHash` (BCrypt)
-- `name`
+- `fullName`
+- `avatarUrl` (nullable)
 - `aiCredits` (int, default 3) — số lượt AI còn lại
+- `isActive` (bool, default true) — khóa tài khoản khi `false`; `UserPrincipal.isEnabled()` đọc trường này
+- `emailVerified` (bool, default false)
+- `role` (`@ManyToOne Role`) — **một user có đúng một role** (không dùng many-to-many)
+- `lastLoginAt` (nullable)
 - `createdAt`, `updatedAt`
+
+> **RBAC:** JWT claim `role` lưu tên role dạng string (vd `"ROLE_ADMIN"`). `@PreAuthorize("hasRole('ADMIN')")` đặt ở **class level** trên mọi admin controller; `SecurityConfig` cũng bảo vệ `/api/v1/admin/**` với `.hasRole("ADMIN")`. Admin mặc định được seed qua `DataInitializer` (đọc `ADMIN_EMAIL` / `ADMIN_PASSWORD` từ env, bỏ qua nếu biến rỗng).
 
 **Trip**
 - `id` (UUID, PK)
@@ -198,6 +208,26 @@ Tất cả endpoint dưới `/api/v1/`. Auth qua header `Authorization: Bearer <
 | DELETE | `/trips/{id}` | Xoá chuyến |
 | GET  | `/weather?city=...&from=...&to=...` | Thời tiết theo ngày của chuyến |
 | GET  | `/places/search?q=...` | Autocomplete thành phố (Maps) |
+
+**Admin endpoints** (yêu cầu `ROLE_ADMIN`, tất cả dưới `/api/v1/admin/`):
+
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET    | `/admin/stats/dashboard` | Tổng số user, trip, AI call & chi phí tháng này |
+| GET    | `/admin/stats/users?from=&to=` | Số user đăng ký theo ngày |
+| GET    | `/admin/stats/trips?from=&to=` | Số trip tạo theo ngày |
+| GET    | `/admin/stats/ai-cost?from=&to=` | Chi phí AI theo provider/tháng |
+| GET    | `/admin/users` | Danh sách user (filter: search, isActive, role) |
+| GET    | `/admin/users/{id}` | Chi tiết user + trips + AI usage |
+| PATCH  | `/admin/users/{id}` | Sửa fullName / aiCredits |
+| PATCH  | `/admin/users/{id}/status` | Bật/tắt tài khoản (`{ "enabled": true/false }`) |
+| POST   | `/admin/users/{id}/grant-credits` | Cộng AI credits (`{ "amount": N }`) |
+| POST   | `/admin/users/{id}/roles` | Đặt role cho user (`{ "role": "ROLE_ADMIN" }`) |
+| GET    | `/admin/trips` | Danh sách tất cả trip (filter: userId, from, to) |
+| GET    | `/admin/trips/{id}` | Chi tiết trip |
+| DELETE | `/admin/trips/{id}` | Xóa trip |
+| GET    | `/admin/ai-usages` | Log AI usage (filter: userId, provider, from, to) |
+| GET    | `/admin/ai-usages/summary` | Tổng hợp chi phí AI theo provider/tháng |
 
 **Quy ước response:**
 ```json

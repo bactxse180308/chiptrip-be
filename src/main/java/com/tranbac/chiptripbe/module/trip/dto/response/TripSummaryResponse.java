@@ -23,4 +23,6 @@ public class TripSummaryResponse {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private Long totalCostVnd;
+    private String imageUrl;
 }
+

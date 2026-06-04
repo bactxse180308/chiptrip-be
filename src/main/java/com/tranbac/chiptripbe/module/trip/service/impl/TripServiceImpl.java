@@ -1,14 +1,26 @@
 package com.tranbac.chiptripbe.module.trip.service.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tranbac.chiptripbe.common.config.AiProperties;
+import com.tranbac.chiptripbe.common.enums.ActivityType;
+import com.tranbac.chiptripbe.common.enums.ChecklistCategory;
 import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
+import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
+import com.tranbac.chiptripbe.module.ai.entity.AiUsage;
+import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
+import com.tranbac.chiptripbe.module.ai.service.AiService;
+import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
+import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
+import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.response.ShareTokenResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripMemberResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
 import com.tranbac.chiptripbe.module.trip.entity.Activity;
 import com.tranbac.chiptripbe.module.trip.entity.ChecklistItem;
@@ -17,7 +29,9 @@ import com.tranbac.chiptripbe.module.trip.entity.TripDay;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ChecklistItemRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripDayRepository;
+import com.tranbac.chiptripbe.module.trip.repository.TripMemberRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
+import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
 import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
@@ -28,7 +42,10 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 
@@ -42,7 +59,15 @@ class TripServiceImpl implements TripService {
     private final TripDayRepository tripDayRepository;
     private final ActivityRepository activityRepository;
     private final ChecklistItemRepository checklistItemRepository;
+    private final TripMemberRepository tripMemberRepository;
+    private final TripMemberService tripMemberService;
     private final UserRepository userRepository;
+    private final AiService aiService;
+    private final AiUsageRepository aiUsageRepository;
+    private final AiProperties aiProperties;
+    private final ObjectMapper objectMapper;
+    private final PlaceEnrichmentService placeEnrichmentService;
+    private final PlaceCacheRepository placeCacheRepository;
 
     @Override
     @Transactional
@@ -54,7 +79,6 @@ class TripServiceImpl implements TripService {
             throw AppException.badRequest("Hết lượt AI. Vui lòng mua thêm credits.");
         }
 
-        // Validate dates
         LocalDate today = LocalDate.now();
         if (request.getStartDate().isBefore(today)) {
             throw AppException.badRequest("Ngày bắt đầu không được trước ngày hôm nay");
@@ -63,22 +87,29 @@ class TripServiceImpl implements TripService {
             throw AppException.badRequest("Ngày kết thúc phải sau ngày bắt đầu");
         }
 
-        // Trừ AI credits
-        user.setAiCredits(user.getAiCredits() - 1);
-        userRepository.save(user);
+        // Gọi AI — thực hiện trước khi ghi DB để không giữ transaction trong khi chờ HTTP
+        AiCallResult aiCallResult = aiService.generateItinerary(request);
+        AiItineraryResult itinerary = aiCallResult.itinerary();
 
-        // Tạo trip entity trước
+        // Styles JSON
         List<String> styleList = request.getStyles() != null ? request.getStyles() : List.of();
         String stylesJson;
         try {
-            stylesJson = new ObjectMapper().writeValueAsString(styleList);
+            stylesJson = objectMapper.writeValueAsString(styleList);
         } catch (JsonProcessingException e) {
             stylesJson = "[]";
         }
 
+        // Title: ưu tiên title từ AI, fallback destination + số ngày
+        String title = (itinerary.getTitle() != null && !itinerary.getTitle().isBlank())
+                ? itinerary.getTitle()
+                : request.getDestination() + " "
+                  + (ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + 1)
+                  + " ngày";
+
         Trip trip = Trip.builder()
                 .user(user)
-                .title(request.getDestination() + " " + ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + " ngày")
+                .title(title)
                 .departure(request.getDeparture())
                 .destination(request.getDestination())
                 .dateStart(request.getStartDate())
@@ -88,91 +119,90 @@ class TripServiceImpl implements TripService {
                 .styles(stylesJson)
                 .build();
         trip = tripRepository.save(trip);
+        tripMemberService.seedOwner(trip, user);
 
-        // Sinh lịch trình theo ngày (mock AI response cho demo)
-        long numDays = ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + 1;
+        // Map AI days → entities
         long totalCost = 0;
         List<TripGenerateResponse.DayDetail> dayDetails = new ArrayList<>();
 
-        String[][] foodPlaces = {
-                {"Bún bò Huế", "Bánh xèo", "Bún chả Hà Nội", "Phở Hà Nội"},
-                {"Cơm tấm Kiều Giang", "Bún mắm", "Lẩu cá kho", "Gỏi cuốn"},
-                {"Bún đậu mắm tôm", "Cao lầu", "Mì Quảng", "Bánh canh"}
-        };
-        String[][] attrPlaces = {
-                {"Vịnh Hạ Long", "Cầu Long Biên", "Hồ Hoàn Kiếm", "Lăng Bác"},
-                {"Đường Phố Cổ Hội An", "Cầu Rồng Đà Nẵng", "Núi Ngũ Hành Sơn", "Bà Nà Hills"},
-                {"Tháp Chàm Po Nagar", "Chùa Thiên Mụ", "Hòn Tằm", "Đèo Cả"}
-        };
-
-        Random random = new Random();
-        long budgetPerDay = request.getBudgetVnd() / numDays;
-
-        for (int d = 0; d < numDays; d++) {
-            LocalDate dayDate = request.getStartDate().plusDays(d);
+        for (AiItineraryResult.AiDay aiDay : itinerary.getDays()) {
+            LocalDate dayDate;
+            try {
+                dayDate = LocalDate.parse(aiDay.getDate());
+            } catch (Exception e) {
+                dayDate = request.getStartDate().plusDays(aiDay.getDayNumber() - 1);
+            }
 
             TripDay day = TripDay.builder()
                     .trip(trip)
-                    .dayNumber(d + 1)
+                    .dayNumber(aiDay.getDayNumber())
                     .date(dayDate)
                     .build();
             day = tripDayRepository.save(day);
 
             List<TripGenerateResponse.ActivityDetail> activityDetails = new ArrayList<>();
             long dayCost = 0;
+            int order = 1;
 
-            // Buổi sáng: ăn sáng + tham quan
-            long foodCost1 = (long) (budgetPerDay * 0.1) + random.nextInt(100_000);
-            dayCost += foodCost1;
-            Activity breakfast = createActivity(day, 1, java.time.LocalTime.of(7, 0),
-                    foodPlaces[d % foodPlaces.length][random.nextInt(foodPlaces[d % foodPlaces.length].length)],
-                    "Bữa sáng địa phương",
-                    com.tranbac.chiptripbe.common.enums.ActivityType.FOOD,
-                    foodCost1, 16.0544 + d * 0.01, 108.2022 + d * 0.01, d);
-            activityDetails.add(toActivityDetail(breakfast));
+            for (AiItineraryResult.AiActivity aiActivity : aiDay.getActivities()) {
+                LocalTime startTime;
+                try {
+                    startTime = LocalTime.parse(aiActivity.getTime());
+                } catch (Exception e) {
+                    startTime = LocalTime.of(8, 0);
+                }
 
-            // Buổi sáng: tham quan
-            long attrCost1 = (long) (budgetPerDay * 0.25) + random.nextInt(150_000);
-            dayCost += attrCost1;
-            Activity morning = createActivity(day, 2, java.time.LocalTime.of(9, 0),
-                    attrPlaces[d % attrPlaces.length][random.nextInt(attrPlaces[d % attrPlaces.length].length)],
-                    "Khám phá địa điểm du lịch nổi tiếng",
-                    com.tranbac.chiptripbe.common.enums.ActivityType.ATTRACTION,
-                    attrCost1, 16.0544 + d * 0.02, 108.2022 + d * 0.02, d);
-            activityDetails.add(toActivityDetail(morning));
+                long cost = aiActivity.getCostVnd() != null ? Math.max(0, aiActivity.getCostVnd()) : 0L;
+                dayCost += cost;
 
-            // Buổi trưa: ăn trưa
-            long foodCost2 = (long) (budgetPerDay * 0.15) + random.nextInt(80_000);
-            dayCost += foodCost2;
-            Activity lunch = createActivity(day, 3, java.time.LocalTime.of(12, 0),
-                    "Nhà hàng " + request.getDestination(),
-                    "Bữa trưa với đặc sản địa phương",
-                    com.tranbac.chiptripbe.common.enums.ActivityType.FOOD,
-                    foodCost2, 16.0544 + d * 0.01, 108.2022 + d * 0.01, d);
-            activityDetails.add(toActivityDetail(lunch));
+                ActivityType activityType = parseActivityType(aiActivity.getType());
 
-            // Buổi chiều: tham quan/thư giãn
-            long attrCost2 = (long) (budgetPerDay * 0.3) + random.nextInt(200_000);
-            dayCost += attrCost2;
-            Activity afternoon = createActivity(day, 4, java.time.LocalTime.of(14, 30),
-                    "Khu du lịch " + request.getDestination(),
-                    "Trải nghiệm và thư giãn buổi chiều",
-                    com.tranbac.chiptripbe.common.enums.ActivityType.ATTRACTION,
-                    attrCost2, 16.0544 + d * 0.015, 108.2022 + d * 0.015, d);
-            activityDetails.add(toActivityDetail(afternoon));
+                BigDecimal latitude = null;
+                BigDecimal longitude = null;
+                String placeId = null;
+                String formattedAddress = null;
+                String geocodingProvider = null;
+                Long placeCacheId = null;
 
-            // Buổi tối: ăn tối
-            long foodCost3 = (long) (budgetPerDay * 0.15) + random.nextInt(100_000);
-            dayCost += foodCost3;
-            Activity dinner = createActivity(day, 5, java.time.LocalTime.of(18, 30),
-                    "Quán ăn " + request.getDestination(),
-                    "Bữa tối với hương vị địa phương",
-                    com.tranbac.chiptripbe.common.enums.ActivityType.FOOD,
-                    foodCost3, 16.0544 + d * 0.01, 108.2022 + d * 0.01, d);
-            activityDetails.add(toActivityDetail(dinner));
+                String activityImageUrl = null;
+                if (shouldGeocode(activityType) && aiActivity.getSearchQuery() != null && !aiActivity.getSearchQuery().isBlank()) {
+                    Optional<PlaceCache> place = placeEnrichmentService.resolvePlace(
+                            aiActivity.getSearchQuery(), request.getDestination());
+                    if (place.isPresent()) {
+                        PlaceCache p = place.get();
+                        latitude = p.getLatitude();
+                        longitude = p.getLongitude();
+                        placeId = p.getGoongPlaceId();
+                        formattedAddress = p.getAddress();
+                        geocodingProvider = "goong";
+                        placeCacheId = p.getId();
+                        activityImageUrl = extractFirstPhotoUrl(p.getPhotosJson());
+                    }
+                }
+
+                Activity activity = Activity.builder()
+                        .day(day)
+                        .displayOrder(order++)
+                        .startTime(startTime)
+                        .name(aiActivity.getName())
+                        .description(aiActivity.getDescription())
+                        .type(activityType)
+                        .costVnd(cost)
+                        .latitude(latitude)
+                        .longitude(longitude)
+                        .searchQuery(aiActivity.getSearchQuery())
+                        .placeId(placeId)
+                        .formattedAddress(formattedAddress)
+                        .geocodingProvider(geocodingProvider)
+                        .placeCacheId(placeCacheId)
+                        .imageUrl(activityImageUrl)
+                        .bookingUrl(aiActivity.getBookingUrl())
+                        .build();
+                activity = activityRepository.save(activity);
+                activityDetails.add(toActivityDetail(activity));
+            }
 
             totalCost += dayCost;
-
             dayDetails.add(TripGenerateResponse.DayDetail.builder()
                     .id(day.getId())
                     .dayNumber(day.getDayNumber())
@@ -182,10 +212,50 @@ class TripServiceImpl implements TripService {
                     .build());
         }
 
-        // Tạo checklist mặc định
-        List<TripGenerateResponse.ChecklistDetail> checklistDetails = createDefaultChecklist(trip);
+        // Map AI checklist → entities
+        List<TripGenerateResponse.ChecklistDetail> checklistDetails = new ArrayList<>();
+        int checklistOrder = 0;
+        for (AiItineraryResult.AiChecklistItem aiItem : itinerary.getChecklist()) {
+            ChecklistItem item = ChecklistItem.builder()
+                    .trip(trip)
+                    .category(parseChecklistCategory(aiItem.getCategory()))
+                    .name(aiItem.getName())
+                    .isChecked(false)
+                    .displayOrder(checklistOrder)
+                    .build();
+            checklistItemRepository.save(item);
+            checklistDetails.add(TripGenerateResponse.ChecklistDetail.builder()
+                    .id(item.getId())
+                    .category(item.getCategory().name())
+                    .name(item.getName())
+                    .isChecked(false)
+                    .displayOrder(checklistOrder)
+                    .build());
+            checklistOrder++;
+        }
 
-        log.info("Generated trip id={} for userId={} with {} days", trip.getId(), userId, numDays);
+        // Trừ AI credits sau khi persist thành công
+        user.setAiCredits(user.getAiCredits() - 1);
+        userRepository.save(user);
+
+        // Log AI usage
+        BigDecimal costUsd = BigDecimal.valueOf(
+                (double) aiCallResult.promptTokens() / 1_000_000 * aiProperties.getPricing().getInputUsdPer1m()
+                + (double) aiCallResult.completionTokens() / 1_000_000 * aiProperties.getPricing().getOutputUsdPer1m()
+        ).setScale(6, RoundingMode.HALF_UP);
+
+        aiUsageRepository.save(AiUsage.builder()
+                .user(user)
+                .trip(trip)
+                .provider("gemini")
+                .tokensIn(aiCallResult.promptTokens())
+                .tokensOut(aiCallResult.completionTokens())
+                .costUsd(costUsd)
+                .build());
+
+        log.info("Generated trip id={} for userId={} with {} days via AI (tokens: {}+{})",
+                trip.getId(), userId, dayDetails.size(),
+                aiCallResult.promptTokens(), aiCallResult.completionTokens());
 
         return TripGenerateResponse.builder()
                 .id(trip.getId())
@@ -207,7 +277,18 @@ class TripServiceImpl implements TripService {
     @Override
     @Transactional(readOnly = true)
     public Page<TripSummaryResponse> getMyTrips(Long userId, Pageable pageable) {
-        return tripRepository.findByUserId(userId, pageable).map(this::toSummaryResponse);
+        Page<Trip> page = tripRepository.findByUserId(userId, pageable);
+        List<Long> tripIds = page.getContent().stream().map(Trip::getId).collect(java.util.stream.Collectors.toList());
+        Map<Long, String> imageUrlMap = new HashMap<>();
+        if (!tripIds.isEmpty()) {
+            List<Object[]> rows = activityRepository.findFirstImageUrlsForTrips(tripIds);
+            for (Object[] row : rows) {
+                Long tripId = row[0] instanceof Number ? ((Number) row[0]).longValue() : Long.parseLong(row[0].toString());
+                String imgUrl = row[1] != null ? row[1].toString() : null;
+                imageUrlMap.putIfAbsent(tripId, imgUrl);
+            }
+        }
+        return page.map(trip -> toSummaryResponse(trip, imageUrlMap.get(trip.getId())));
     }
 
     @Override
@@ -239,7 +320,7 @@ class TripServiceImpl implements TripService {
         }
         if (request.getStyles() != null) {
             try {
-                trip.setStyles(new ObjectMapper().writeValueAsString(request.getStyles()));
+                trip.setStyles(objectMapper.writeValueAsString(request.getStyles()));
             } catch (JsonProcessingException e) {
                 // ignore
             }
@@ -254,6 +335,7 @@ class TripServiceImpl implements TripService {
     @Transactional
     public void deleteTrip(Long userId, Long tripId) {
         Trip trip = findTripByIdAndUserId(tripId, userId);
+        aiUsageRepository.nullifyTripReference(tripId);
         tripRepository.delete(trip);
         log.info("Deleted trip id={} by userId={}", tripId, userId);
     }
@@ -275,6 +357,7 @@ class TripServiceImpl implements TripService {
                 .styles(original.getStyles())
                 .build();
         clone = tripRepository.save(clone);
+        tripMemberService.seedOwner(clone, original.getUser());
 
         // Clone days and activities
         for (TripDay originalDay : original.getDays()) {
@@ -362,10 +445,22 @@ class TripServiceImpl implements TripService {
         List<TripDay> days = tripDayRepository.findByTripIdOrderByDayNumber(trip.getId());
         List<ChecklistItem> checklist = checklistItemRepository.findByTripIdOrderByDisplayOrder(trip.getId());
 
+        List<Long> placeCacheIds = days.stream()
+                .flatMap(day -> activityRepository.findByDayIdOrderByDisplayOrder(day.getId()).stream())
+                .map(Activity::getPlaceCacheId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        Map<Long, PlaceCache> cacheMap = new HashMap<>();
+        if (!placeCacheIds.isEmpty()) {
+            placeCacheRepository.findAllById(placeCacheIds).forEach(p -> cacheMap.put(p.getId(), p));
+        }
+
         List<TripDetailResponse.DayDetail> dayDetails = days.stream().map(day -> {
             List<Activity> activities = activityRepository.findByDayIdOrderByDisplayOrder(day.getId());
             List<TripDetailResponse.ActivityDetail> activityDetails = activities.stream()
-                    .map(this::toTripDetailActivityDetail).toList();
+                    .map(act -> toTripDetailActivityDetail(act, cacheMap)).toList();
             return TripDetailResponse.DayDetail.builder()
                     .id(day.getId())
                     .dayNumber(day.getDayNumber())
@@ -382,6 +477,16 @@ class TripServiceImpl implements TripService {
                         .name(c.getName())
                         .isChecked(c.getIsChecked())
                         .displayOrder(c.getDisplayOrder())
+                        .build()).toList();
+
+        List<TripMemberResponse> members = tripMemberRepository.findByTripIdWithUser(trip.getId())
+                .stream().map(m -> TripMemberResponse.builder()
+                        .id(m.getId())
+                        .userId(m.getUser() != null ? m.getUser().getId() : null)
+                        .displayName(m.getDisplayName())
+                        .avatarUrl(m.getUser() != null ? m.getUser().getAvatarUrl() : null)
+                        .role(m.getRole())
+                        .createdAt(m.getCreatedAt())
                         .build()).toList();
 
         return TripDetailResponse.builder()
@@ -403,12 +508,17 @@ class TripServiceImpl implements TripService {
                         .email(trip.getUser().getEmail())
                         .fullName(trip.getUser().getFullName())
                         .build())
+                .members(members)
                 .days(dayDetails)
                 .checklist(checklistDetails)
                 .build();
     }
 
     private TripSummaryResponse toSummaryResponse(Trip trip) {
+        return toSummaryResponse(trip, null);
+    }
+
+    private TripSummaryResponse toSummaryResponse(Trip trip, String imageUrl) {
         return TripSummaryResponse.builder()
                 .id(trip.getId())
                 .userId(trip.getUser().getId())
@@ -424,25 +534,30 @@ class TripServiceImpl implements TripService {
                 .styles(trip.getStyles())
                 .createdAt(trip.getCreatedAt())
                 .updatedAt(trip.getUpdatedAt())
+                .imageUrl(imageUrl)
                 .build();
     }
 
-    private Activity createActivity(TripDay day, int order, java.time.LocalTime time,
-                                   String name, String desc,
-                                   com.tranbac.chiptripbe.common.enums.ActivityType type,
-                                   long cost, double lat, double lng, int dayIndex) {
-        Activity activity = Activity.builder()
-                .day(day)
-                .displayOrder(order)
-                .startTime(time)
-                .name(name)
-                .description(desc)
-                .type(type)
-                .costVnd(cost)
-                .latitude(java.math.BigDecimal.valueOf(lat + dayIndex * 0.005))
-                .longitude(java.math.BigDecimal.valueOf(lng + dayIndex * 0.005))
-                .build();
-        return activityRepository.save(activity);
+    private boolean shouldGeocode(ActivityType type) {
+        return type == ActivityType.FOOD || type == ActivityType.ATTRACTION || type == ActivityType.ACCOMMODATION;
+    }
+
+    private ActivityType parseActivityType(String type) {
+        if (type == null) return ActivityType.OTHER;
+        try {
+            return ActivityType.valueOf(type.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ActivityType.OTHER;
+        }
+    }
+
+    private ChecklistCategory parseChecklistCategory(String category) {
+        if (category == null) return ChecklistCategory.OTHER;
+        try {
+            return ChecklistCategory.valueOf(category.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ChecklistCategory.OTHER;
+        }
     }
 
     private TripGenerateResponse.ActivityDetail toActivityDetail(Activity activity) {
@@ -458,10 +573,20 @@ class TripServiceImpl implements TripService {
                 .imageUrl(activity.getImageUrl())
                 .bookingUrl(activity.getBookingUrl())
                 .displayOrder(activity.getDisplayOrder())
+                .placeCacheId(activity.getPlaceCacheId())
+                .address(activity.getFormattedAddress())
                 .build();
     }
 
-    private TripDetailResponse.ActivityDetail toTripDetailActivityDetail(Activity activity) {
+    private TripDetailResponse.ActivityDetail toTripDetailActivityDetail(Activity activity, Map<Long, PlaceCache> cacheMap) {
+        String imgUrl = activity.getImageUrl();
+        if ((imgUrl == null || imgUrl.isBlank()) && activity.getPlaceCacheId() != null) {
+            PlaceCache p = cacheMap.get(activity.getPlaceCacheId());
+            if (p != null) {
+                imgUrl = extractFirstPhotoUrl(p.getPhotosJson());
+            }
+        }
+
         return TripDetailResponse.ActivityDetail.builder()
                 .id(activity.getId())
                 .startTime(activity.getStartTime())
@@ -471,40 +596,28 @@ class TripServiceImpl implements TripService {
                 .costVnd(activity.getCostVnd())
                 .latitude(activity.getLatitude())
                 .longitude(activity.getLongitude())
-                .imageUrl(activity.getImageUrl())
+                .imageUrl(imgUrl)
                 .bookingUrl(activity.getBookingUrl())
                 .displayOrder(activity.getDisplayOrder())
+                .placeCacheId(activity.getPlaceCacheId())
+                .address(activity.getFormattedAddress())
                 .build();
     }
 
-    private List<TripGenerateResponse.ChecklistDetail> createDefaultChecklist(Trip trip) {
-        List<TripGenerateResponse.ChecklistDetail> items = new ArrayList<>();
-        String[][] defaults = {
-                {"CMND/CCCD", "PAPERS"},
-                {"Vé máy bay / giấy tờ đặt tour", "PAPERS"},
-                {"Tiền mặt / Thẻ ATM", "PAPERS"},
-                {"Quần áo theo thời tiết", "CLOTHES"},
-                {"Kem chống nắng", "HYGIENE"},
-                {"Thuốc men / Bảo hiểm du lịch", "OTHER"},
-        };
-
-        for (int i = 0; i < defaults.length; i++) {
-            ChecklistItem item = ChecklistItem.builder()
-                    .trip(trip)
-                    .category(com.tranbac.chiptripbe.common.enums.ChecklistCategory.valueOf(defaults[i][1]))
-                    .name(defaults[i][0])
-                    .isChecked(false)
-                    .displayOrder(i)
-                    .build();
-            checklistItemRepository.save(item);
-            items.add(TripGenerateResponse.ChecklistDetail.builder()
-                    .id(item.getId())
-                    .category(item.getCategory() != null ? item.getCategory().name() : defaults[i][1])
-                    .name(item.getName())
-                    .isChecked(false)
-                    .displayOrder(i)
-                    .build());
-        }
-        return items;
+    private String extractFirstPhotoUrl(String photosJson) {
+        if (photosJson == null || photosJson.isBlank()) return null;
+        try {
+            List<Map<String, String>> raw = objectMapper.readValue(photosJson, new TypeReference<List<Map<String, String>>>() {});
+            if (raw != null && !raw.isEmpty()) {
+                Map<String, String> first = raw.get(0);
+                String url = first.get("thumbnail");
+                if (url == null || url.isBlank()) {
+                    url = first.get("url");
+                }
+                return url;
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
+
 }

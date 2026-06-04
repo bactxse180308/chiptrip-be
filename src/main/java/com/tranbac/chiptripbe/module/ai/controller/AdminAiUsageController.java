@@ -4,6 +4,7 @@ import com.tranbac.chiptripbe.common.response.ApiResponse;
 import com.tranbac.chiptripbe.common.response.PageMeta;
 import com.tranbac.chiptripbe.module.ai.dto.response.AiUsageResponse;
 import com.tranbac.chiptripbe.module.ai.service.AdminAiUsageService;
+import com.tranbac.chiptripbe.module.stats.dto.response.AiCostByProviderMonthResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -44,5 +45,14 @@ public class AdminAiUsageController {
                 PageRequest.of(page, size, Sort.by("createdAt").descending()));
 
         return ResponseEntity.ok(ApiResponse.ok(result.getContent(), PageMeta.of(result)));
+    }
+
+    @Operation(summary = "Tổng hợp chi phí AI theo provider và tháng (dùng cho biểu đồ)")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/summary")
+    public ResponseEntity<ApiResponse<List<AiCostByProviderMonthResponse>>> getSummary(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+        return ResponseEntity.ok(ApiResponse.ok(adminAiUsageService.getSummary(from, to)));
     }
 }

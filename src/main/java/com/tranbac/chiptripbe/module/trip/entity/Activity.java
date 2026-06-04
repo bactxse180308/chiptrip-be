@@ -56,4 +56,22 @@ public class Activity extends BaseEntity {
 
     @Column(name = "display_order", nullable = false)
     private Integer displayOrder;
+
+    @Nationalized
+    @Column(name = "search_query", length = 300)
+    private String searchQuery;
+
+    @Column(name = "place_id", length = 500)
+    private String placeId;
+
+    @Nationalized
+    @Column(name = "formatted_address", length = 500)
+    private String formattedAddress;
+
+    @Column(name = "geocoding_provider", length = 30)
+    private String geocodingProvider;
+
+    /** FK sang place_cache.id — null nếu không geocode được */
+    @Column(name = "place_cache_id")
+    private Long placeCacheId;
 }

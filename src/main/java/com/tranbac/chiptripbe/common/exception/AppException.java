@@ -40,4 +40,8 @@ public class AppException extends RuntimeException {
     public static AppException tooManyRequests(String code, String message) {
         return new AppException(HttpStatus.TOO_MANY_REQUESTS, code, message, null);
     }
+
+    public static AppException internal(String message) {
+        return new AppException(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", message, null);
+    }
 }

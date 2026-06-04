@@ -60,6 +60,10 @@ public class User extends BaseAuditEntity {
     @Column(name = "oauth_provider_id", length = 255)
     private String oauthProviderId;
 
+    @Nationalized
+    @Column(name = "preferences", length = 500)
+    private String preferences;
+
     public boolean hasRole(String roleName) {
         return role != null && role.getName().equals(roleName);
     }

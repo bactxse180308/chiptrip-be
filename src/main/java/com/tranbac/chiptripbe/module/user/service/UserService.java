@@ -6,10 +6,13 @@ import com.tranbac.chiptripbe.module.user.dto.response.RoleResponse;
 import com.tranbac.chiptripbe.module.user.dto.response.UserResponse;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import java.util.List;
 
 public interface UserService {
 
     UserResponse getMyProfile(Long userId);
+
+    List<UserResponse> searchUsers(String query);
 
     UserResponse updateProfile(Long userId, UpdateProfileRequest request);
 
@@ -26,6 +29,8 @@ public interface UserService {
     void adminDeactivateUser(Long userId);
 
     void adminActivateUser(Long userId);
+
+    void adminToggleStatus(Long userId, boolean enabled);
 
     UserResponse adminGrantCredits(Long userId, GrantCreditsRequest request);
 

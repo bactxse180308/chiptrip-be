@@ -9,6 +9,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.List;
+import java.util.ArrayList;
 
 @Getter
 @Builder
@@ -29,6 +30,7 @@ public class TripDetailResponse {
     private String shareToken;
 
     private UserInfo user;
+    private List<TripMemberResponse> members;
     private List<DayDetail> days;
     private List<ChecklistItemDetail> checklist;
 
@@ -64,6 +66,9 @@ public class TripDetailResponse {
         private String imageUrl;
         private String bookingUrl;
         private Integer displayOrder;
+        /** ID trong bảng place_cache — frontend dùng để gọi GET /places/{placeCacheId} */
+        private Long placeCacheId;
+        private String address;
     }
 
     @Getter

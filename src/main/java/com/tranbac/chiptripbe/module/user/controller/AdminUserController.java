@@ -5,6 +5,7 @@ import com.tranbac.chiptripbe.common.response.PageMeta;
 import com.tranbac.chiptripbe.module.user.dto.request.AdminUpdateUserRequest;
 import com.tranbac.chiptripbe.module.user.dto.request.AssignRoleRequest;
 import com.tranbac.chiptripbe.module.user.dto.request.GrantCreditsRequest;
+import com.tranbac.chiptripbe.module.user.dto.request.ToggleUserStatusRequest;
 import com.tranbac.chiptripbe.module.user.dto.response.AdminUserDetailResponse;
 import com.tranbac.chiptripbe.module.user.dto.response.UserResponse;
 import com.tranbac.chiptripbe.module.user.service.UserService;
@@ -62,6 +63,17 @@ public class AdminUserController {
             @PathVariable Long id,
             @Valid @RequestBody AdminUpdateUserRequest request) {
         return ResponseEntity.ok(ApiResponse.ok(userService.adminUpdateUser(id, request)));
+    }
+
+    @Operation(summary = "Khóa / mở tài khoản (enabled: true = mở, false = khóa)")
+    @SecurityRequirement(name = "bearerAuth")
+    @PatchMapping("/{id}/status")
+    public ResponseEntity<ApiResponse<Void>> toggleStatus(
+            @PathVariable Long id,
+            @Valid @RequestBody ToggleUserStatusRequest request) {
+        userService.adminToggleStatus(id, request.getEnabled());
+        String msg = request.getEnabled() ? "Đã kích hoạt tài khoản" : "Đã vô hiệu hoá tài khoản";
+        return ResponseEntity.ok(ApiResponse.ok(null, msg));
     }
 
     @Operation(summary = "Kích hoạt tài khoản")
