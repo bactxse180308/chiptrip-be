@@ -31,6 +31,14 @@ public class UserController {
         return ResponseEntity.ok(ApiResponse.ok(userService.getMyProfile(principal.getId())));
     }
 
+    @Operation(summary = "Tìm kiếm người dùng")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/search")
+    public ResponseEntity<ApiResponse<java.util.List<UserResponse>>> searchUsers(
+            @RequestParam String q) {
+        return ResponseEntity.ok(ApiResponse.ok(userService.searchUsers(q)));
+    }
+
     @Operation(summary = "Cập nhật hồ sơ (fullName, avatarUrl)")
     @SecurityRequirement(name = "bearerAuth")
     @PatchMapping("/me")

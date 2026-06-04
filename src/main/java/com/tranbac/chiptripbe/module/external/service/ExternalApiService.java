@@ -2,6 +2,8 @@ package com.tranbac.chiptripbe.module.external.service;
 
 import com.tranbac.chiptripbe.module.external.dto.response.PlaceSearchResponse;
 import com.tranbac.chiptripbe.module.external.dto.response.WeatherResponse;
+import com.tranbac.chiptripbe.module.geocoding.client.GoongClient;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -16,52 +18,36 @@ import java.util.Map;
 
 import reactor.core.publisher.Mono;
 
+@Slf4j
 @Service
 public class ExternalApiService {
 
-    private final WebClient webClient = WebClient.builder().build();
-
-    @Value("${app.external.google-places-api-key:}")
-    private String googlePlacesKey;
+    private final GoongClient goongClient;
+    private final WebClient weatherClient;
 
     @Value("${app.external.openweather-api-key:}")
     private String openWeatherKey;
 
-    @SuppressWarnings("unchecked")
-    public PlaceSearchResponse searchPlaces(String query) {
-        if (googlePlacesKey == null || googlePlacesKey.isBlank()) {
-            return buildFallbackPlaces(query);
-        }
-        try {
-            String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8);
-            String url = "https://maps.googleapis.com/maps/api/place/autocomplete/json?input="
-                    + encodedQuery + "&types=(cities)&language=vi&key=" + googlePlacesKey;
-
-            Map<String, Object> response = webClient.get()
-                    .uri(url)
-                    .retrieve()
-                    .bodyToMono(Map.class)
-                    .timeout(Duration.ofSeconds(5))
-                    .onErrorResume(e -> Mono.just(Map.of("predictions", List.of())))
-                    .block();
-
-            List<Map<String, Object>> predictions = (List<Map<String, Object>>) response.getOrDefault("predictions", List.of());
-            List<PlaceSearchResponse.Place> places = new ArrayList<>();
-            for (Map<String, Object> p : predictions) {
-                if (places.size() >= 5) break;
-                Map<String, Object> structured = (Map<String, Object>) p.getOrDefault("structured_formatting", Map.of());
-                places.add(PlaceSearchResponse.Place.builder()
-                        .description((String) p.getOrDefault("description", ""))
-                        .mainText((String) structured.getOrDefault("main_text", ""))
-                        .secondaryText((String) structured.getOrDefault("secondary_text", ""))
-                        .build());
-            }
-            return PlaceSearchResponse.builder().predictions(places).build();
-        } catch (Exception e) {
-            return buildFallbackPlaces(query);
-        }
+    public ExternalApiService(GoongClient goongClient, WebClient.Builder webClientBuilder) {
+        this.goongClient = goongClient;
+        this.weatherClient = webClientBuilder.build();
     }
 
+    public PlaceSearchResponse searchPlaces(String query) {
+        List<GoongClient.AutocompleteResult> results = goongClient.autocomplete(query);
+        if (results.isEmpty()) return buildFallbackPlaces(query);
+
+        List<PlaceSearchResponse.Place> places = results.stream()
+                .map(r -> PlaceSearchResponse.Place.builder()
+                        .description(r.description())
+                        .mainText(r.mainText())
+                        .secondaryText(r.secondaryText())
+                        .build())
+                .toList();
+        return PlaceSearchResponse.builder().predictions(places).build();
+    }
+
+    @SuppressWarnings("unchecked")
     public WeatherResponse getWeather(String city, LocalDate from, LocalDate to) {
         if (openWeatherKey == null || openWeatherKey.isBlank()) {
             return buildFallbackWeather(city, from, to);
@@ -71,7 +57,7 @@ public class ExternalApiService {
             String geoUrl = "https://api.openweathermap.org/geo/1.0/direct?q=" + encodedCity
                     + "&limit=1&appid=" + openWeatherKey;
 
-            List<Map<String, Object>> geoResult = webClient.get()
+            List<Map<String, Object>> geoResult = weatherClient.get()
                     .uri(geoUrl)
                     .retrieve()
                     .bodyToMono(List.class)
@@ -90,7 +76,7 @@ public class ExternalApiService {
             String forecastUrl = "https://api.openweathermap.org/data/2.5/forecast?lat=" + lat
                     + "&lon=" + lon + "&appid=" + openWeatherKey + "&units=metric";
 
-            Map<String, Object> forecastResult = webClient.get()
+            Map<String, Object> forecastResult = weatherClient.get()
                     .uri(forecastUrl)
                     .retrieve()
                     .bodyToMono(Map.class)
@@ -128,21 +114,25 @@ public class ExternalApiService {
             }
             return WeatherResponse.builder().city(city).forecasts(forecasts).build();
         } catch (Exception e) {
+            log.warn("Weather API failed for city='{}': {}", city, e.getMessage());
             return buildFallbackWeather(city, from, to);
         }
     }
 
     private PlaceSearchResponse buildFallbackPlaces(String query) {
         String[][] cityHints = {
-                {"Ha Noi", "Thu do Viet Nam"},
-                {"Da Nang", "Thanh pho mien Trung"},
-                {"Ho Chi Minh", "Thanh pho Ho Chi Minh"},
-                {"Hoi An", "Pho co Hoi An, Quang Nam"},
-                {"Nha Trang", "Thanh pho bien Khanh Hoa"}
+                {"Hà Nội", "Thủ đô Việt Nam"},
+                {"Đà Nẵng", "Thành phố miền Trung"},
+                {"Hồ Chí Minh", "Thành phố Hồ Chí Minh"},
+                {"Hội An", "Phố cổ Hội An, Quảng Nam"},
+                {"Nha Trang", "Thành phố biển Khánh Hòa"},
+                {"Đà Lạt", "Thành phố ngàn hoa"},
+                {"Phú Quốc", "Đảo ngọc Phú Quốc"},
         };
         List<PlaceSearchResponse.Place> places = new ArrayList<>();
+        String q = query.toLowerCase();
         for (String[] c : cityHints) {
-            if (c[0].toLowerCase().contains(query.toLowerCase())) {
+            if (c[0].toLowerCase().contains(q) || c[1].toLowerCase().contains(q)) {
                 places.add(PlaceSearchResponse.Place.builder()
                         .description(c[0] + " - " + c[1])
                         .mainText(c[0])

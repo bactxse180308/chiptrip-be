@@ -16,6 +16,7 @@ public class UserResponse {
     private Boolean isActive;
     private Boolean emailVerified;
     private String role;
+    private String preferences;
     private LocalDateTime lastLoginAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

@@ -139,6 +139,9 @@ class AuthServiceImpl implements AuthService {
         refreshTokenRepository.save(stored);
 
         User user = stored.getUser();
+        if (!user.getIsActive()) {
+            throw AppException.forbidden("Tài khoản đã bị vô hiệu hóa");
+        }
         String newRawToken = UUID.randomUUID().toString();
         saveRefreshToken(user, newRawToken);
 

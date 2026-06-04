@@ -53,6 +53,9 @@ public class TripGenerateResponse {
         private String imageUrl;
         private String bookingUrl;
         private Integer displayOrder;
+        /** ID trong bảng place_cache — frontend dùng để gọi GET /places/{placeCacheId} */
+        private Long placeCacheId;
+        private String address;
     }
 
     @Getter

@@ -5,6 +5,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -29,4 +30,9 @@ public interface AiUsageRepository extends JpaRepository<AiUsage, Long>, JpaSpec
     @Query("SELECT COALESCE(SUM(a.costUsd), 0), COUNT(a) " +
            "FROM AiUsage a WHERE a.createdAt >= :from AND a.createdAt <= :to")
     Object[] aggregateForPeriod(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
+
+    /** Set trip_id = NULL để tránh FK constraint khi xóa trip */
+    @Modifying
+    @Query("UPDATE AiUsage a SET a.trip = null WHERE a.trip.id = :tripId")
+    void nullifyTripReference(@Param("tripId") Long tripId);
 }

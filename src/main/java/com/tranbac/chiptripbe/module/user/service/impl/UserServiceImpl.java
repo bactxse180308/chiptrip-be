@@ -59,6 +59,17 @@ class UserServiceImpl implements UserService {
     }
 
     @Override
+    public List<UserResponse> searchUsers(String query) {
+        if (!StringUtils.hasText(query)) {
+            return List.of();
+        }
+        Specification<User> spec = Specification.where(UserSpecification.withIsActive(true))
+                .and(UserSpecification.withSearch(query));
+        Page<User> usersPage = userRepository.findAll(spec, org.springframework.data.domain.PageRequest.of(0, 10));
+        return usersPage.getContent().stream().map(this::toResponse).toList();
+    }
+
+    @Override
     @Transactional
     public UserResponse updateProfile(Long userId, UpdateProfileRequest request) {
         User user = findActive(userId);
@@ -67,6 +78,9 @@ class UserServiceImpl implements UserService {
         }
         if (request.getAvatarUrl() != null) {
             user.setAvatarUrl(request.getAvatarUrl());
+        }
+        if (request.getPreferences() != null) {
+            user.setPreferences(request.getPreferences());
         }
         log.info("Profile updated for userId={}", userId);
         return toResponse(userRepository.save(user));
@@ -212,6 +226,21 @@ class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
+    public void adminToggleStatus(Long userId, boolean enabled) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
+        user.setIsActive(enabled);
+        userRepository.save(user);
+        if (!enabled) {
+            List<RefreshToken> tokens = refreshTokenRepository.findAllByUserId(userId);
+            tokens.forEach(t -> t.setRevoked(true));
+            refreshTokenRepository.saveAll(tokens);
+        }
+        log.info("Admin toggled userId={} enabled={}", userId, enabled);
+    }
+
+    @Override
+    @Transactional
     public UserResponse adminGrantCredits(Long userId, GrantCreditsRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
@@ -323,6 +352,7 @@ class UserServiceImpl implements UserService {
                 .isActive(user.getIsActive())
                 .emailVerified(user.getEmailVerified())
                 .role(user.getRole().getName())
+                .preferences(user.getPreferences())
                 .lastLoginAt(user.getLastLoginAt())
                 .createdAt(user.getCreatedAt())
                 .updatedAt(user.getUpdatedAt())
