@@ -25,7 +25,7 @@ import java.util.Map;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-class câAiGenerateServiceImpl implements AiService {
+class AiGenerateServiceImpl implements AiService {
 
     private final WebClient.Builder webClientBuilder;
     private final AiProperties aiProperties;

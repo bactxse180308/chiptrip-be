@@ -75,6 +75,17 @@ app:
     cache-ttl-days: 30
   external:
     openweather-api-key: ${OPENWEATHER_API_KEY:}
+  rate-limit:
+    login-limit: 5
+    login-window-minutes: 15
+    register-limit: 3
+    register-window-minutes: 60
+    forgot-password-limit: 3
+    forgot-password-window-minutes: 60
+    generate-limit: 5
+    generate-window-minutes: 1
+    default-limit: 60
+    default-window-minutes: 1
 
 springdoc:
   api-docs:

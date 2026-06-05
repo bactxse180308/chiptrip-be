@@ -9,6 +9,7 @@ import com.tranbac.chiptripbe.module.trip.dto.response.ShareTokenResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
+import com.tranbac.chiptripbe.module.trip.service.TripExportService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -18,7 +19,9 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -30,6 +33,7 @@ import org.springframework.web.bind.annotation.*;
 public class TripController {
 
     private final TripService tripService;
+    private final TripExportService tripExportService;
 
     @Operation(summary = "Sinh lịch trình bằng AI (trừ 1 lượt AI)")
     @SecurityRequirement(name = "bearerAuth")
@@ -120,5 +124,18 @@ public class TripController {
     @GetMapping("/shared/{shareToken}")
     public ResponseEntity<ApiResponse<TripDetailResponse>> getSharedTrip(@PathVariable String shareToken) {
         return ResponseEntity.ok(ApiResponse.ok(tripService.getSharedTrip(shareToken)));
+    }
+
+    @Operation(summary = "Xuất lịch trình ra file PDF")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/{id}/export/pdf")
+    public ResponseEntity<byte[]> exportPdf(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @PathVariable Long id) {
+        byte[] pdf = tripExportService.exportPdf(principal.getId(), id);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"chuyen-di-" + id + ".pdf\"")
+                .contentType(MediaType.APPLICATION_PDF)
+                .body(pdf);
     }
 }
