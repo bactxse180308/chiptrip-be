@@ -20,17 +20,22 @@ AI Travel Planner — REST API backend cho ứng dụng lên kế hoạch du l�
 ```
 src/main/java/com/tranbac/chiptripbe/
 ├── common/
-│   ├── config/         # SecurityConfig, JpaAuditingConfig, DataSeeder
+│   ├── config/         # SecurityConfig, JpaAuditingConfig, AiProperties, GoongProperties, SerpApiProperties
 │   ├── entity/         # BaseEntity, BaseAuditEntity
 │   ├── enums/          # RoleName, ActivityType, ChecklistCategory
 │   ├── exception/      # AppException, GlobalExceptionHandler
+│   ├── filter/         # RequestLoggingFilter, RateLimitFilter
 │   ├── response/       # ApiResponse<T>, ErrorResponse
 │   └── security/       # JwtProvider, JwtAuthFilter, UserPrincipal, ...
 └── module/
-    ├── auth/           # AuthController, AuthService, RefreshToken
+    ├── auth/           # AuthController, AuthService, RefreshToken, OTP
     ├── user/           # User, Role
-    ├── trip/           # Trip, TripDay, Activity, ChecklistItem
-    └── ai/             # AiUsage
+    ├── trip/           # Trip, TripDay, Activity, ChecklistItem, TripMember, TripExpense
+    ├── ai/             # AiService (Gemini), AiSuggestService, AiUsage
+    ├── geocoding/      # GoongClient, SerpApiClient, GoongGeocodingService
+    ├── place/          # PlaceCache, PlaceEnrichmentService
+    ├── external/       # Weather (OpenWeather), Places search
+    └── stats/          # Admin dashboard & analytics
 ```
 
 

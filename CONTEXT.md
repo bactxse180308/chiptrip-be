@@ -66,12 +66,12 @@
 - **flutter_secure_storage** cho token
 
 ### AI
-- **LLM API có sẵn**: chốt provider sau spike P0.6 (so sánh **OpenAI GPT-4o-mini / Gemini 1.5 Flash / Claude Haiku** về chất lượng JSON, chi phí, độ trễ).
-- **Yêu cầu bắt buộc:** dùng **JSON mode / Structured Output** để output luôn parseable.
+- **Đã chốt Gemini `gemini-2.5-flash`** qua API `https://generativelanguage.googleapis.com/v1beta` (`:generateContent`).
+- **Yêu cầu bắt buộc:** dùng **JSON mode / Structured Output** (`responseMimeType: application/json` + `responseSchema`) để output luôn parseable.
 - **Không** tự train model. **Không** self-host model open-source ở MVP.
 
 ### API ngoài
-- **Google Maps API** (geocoding, hiển thị bản đồ)
+- **Goong REST API** (geocoding, autocomplete) + **Goong Map JS** (hiển thị bản đồ FE) + **SerpApi** (enrichment: rating, giờ mở cửa, ảnh)
 - **OpenWeather API** (dự báo thời tiết)
 
 ### Infra & DevOps
@@ -103,8 +103,8 @@
                         ▼                   ▼
                 ┌────────────┐      ┌─────────────────┐
                 │ PostgreSQL │      │ External APIs   │
-                │ (Flyway    │      │ - LLM (OpenAI…) │
-                │  migration)│      │ - Google Maps   │
+                │ (Flyway    │      │ - LLM (Gemini)  │
+                │  migration)│      │ - Goong + SerpApi│
                 └────────────┘      │ - OpenWeather   │
                                     └─────────────────┘
 ```
@@ -297,7 +297,7 @@ Client → POST /trips/generate (input)
 ```
 
 ### 7.4. Bảo mật API key
-- **API key LLM/Maps/Weather đặt trong biến môi trường** (Spring `application-prod.yml` đọc từ `${OPENAI_API_KEY}`).
+- **API key LLM/Maps/Weather đặt trong biến môi trường** (Spring đọc từ `${GEMINI_API_KEY}`, `${GOONG_API_KEY}`, `${SERPAPI_API_KEY}`, `${OPENWEATHER_API_KEY}`).
 - **Tuyệt đối không hardcode, không commit lên Git.**
 - Frontend **không** gọi LLM trực tiếp — chỉ gọi backend.
 

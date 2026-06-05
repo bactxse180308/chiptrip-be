@@ -32,9 +32,9 @@ Backend — TripServiceImpl.generateTrip()
   ├─ 4. AiService.generateItinerary(request)
   │       └─ AiGenerateServiceImpl
   │             ├─ Build system prompt + user prompt (tiếng Việt)
-  │             ├─ Build json_schema strict (bắt AI trả đúng format)
-  │             ├─ POST https://api.openai.com/v1/chat/completions
-  │             │    model: gpt-4o-mini, response_format: json_schema
+  │             ├─ Build responseSchema strict (bắt AI trả đúng format)
+  │             ├─ POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+  │             │    responseMimeType: application/json, responseSchema, thinkingConfig.thinkingBudget=0
   │             ├─ Parse JSON → AiItineraryResult
   │             ├─ Validate: days không rỗng, activity có time+name+searchQuery
   │             ├─ Retry tối đa 2 lần nếu: 429 / 5xx / timeout / parse fail / validate fail
@@ -46,21 +46,22 @@ Backend — TripServiceImpl.generateTrip()
   │       └─ Với mỗi AiActivity:
   │             ├─ Parse ActivityType (FOOD/ATTRACTION/TRANSPORT/ACCOMMODATION/OTHER)
   │             ├─ Nếu type là FOOD / ATTRACTION / ACCOMMODATION:
-  │             │    └─ GeocodingService.searchPlace(searchQuery, destination)
-  │             │         └─ GooglePlacesGeocodingService
-  │             │               ├─ POST https://places.googleapis.com/v1/places:searchText
-  │             │               │    textQuery: "Bánh căn Nhà Chung Đà Lạt, Đà Lạt, Việt Nam"
-  │             │               ├─ Parse place đầu tiên → GeocodingResult
-  │             │               └─ Nếu fail/không tìm thấy → null (graceful)
-  │             ├─ Activity.latitude/longitude = từ GeocodingResult (hoặc null)
-  │             ├─ Activity.placeId, formattedAddress, geocodingProvider = "google"
+  │             │    └─ PlaceEnrichmentService.resolvePlace(searchQuery, destination)
+  │             │         └─ GoongGeocodingService (GoongClient) + SerpApiClient (enrichment)
+  │             │               ├─ GET https://rsapi.goong.io/geocode (hoặc /Place/AutoComplete)
+  │             │               │    address: "Bánh căn Nhà Chung Đà Lạt, Đà Lạt"
+  │             │               ├─ Parse kết quả đầu tiên → PlaceCache (lat/lng, address, placeId)
+  │             │               ├─ SerpApi enrich: rating, giờ mở cửa, ảnh (cache PlaceCache)
+  │             │               └─ Nếu fail/không tìm thấy → Optional.empty() (graceful)
+  │             ├─ Activity.latitude/longitude = từ PlaceCache (hoặc null)
+  │             ├─ Activity.placeId, formattedAddress, geocodingProvider = "goong", placeCacheId, imageUrl
   │             └─ Save Activity
   │
   ├─ 7. Với mỗi AiChecklistItem → ChecklistItem entity, save DB
   │
   ├─ 8. Trừ user.aiCredits (sau khi persist thành công)
   │
-  ├─ 9. Log AiUsage { provider="openai", tokensIn, tokensOut, costUsd }
+  ├─ 9. Log AiUsage { provider="gemini", tokensIn, tokensOut, costUsd }
   │
   └─ 10. Trả TripGenerateResponse (id, title, days, activities, checklist, totalCostVnd)
 
@@ -78,24 +79,29 @@ Frontend — Result page
 src/main/java/com/tranbac/chiptripbe/
 ├── common/config/
 │   ├── AiProperties.java              — @ConfigurationProperties("app.ai")
-│   └── GeocodingProperties.java       — @ConfigurationProperties("app.geocoding")
+│   ├── GeocodingProperties.java       — @ConfigurationProperties("app.geocoding") (provider selection)
+│   ├── GoongProperties.java           — @ConfigurationProperties("app.goong")
+│   └── SerpApiProperties.java         — @ConfigurationProperties("app.serpapi")
 │
 ├── module/ai/
 │   ├── dto/
-│   │   ├── AiItineraryResult.java     — Internal DTO parse JSON từ OpenAI
+│   │   ├── AiItineraryResult.java     — Internal DTO parse JSON từ Gemini
 │   │   └── AiCallResult.java          — Wrapper: itinerary + promptTokens + completionTokens
 │   └── service/
 │       ├── AiService.java             — Interface: generateItinerary(request) → AiCallResult
 │       └── impl/
-│           └── AiGenerateServiceImpl.java  — WebClient → OpenAI, retry logic, validate
+│           └── AiGenerateServiceImpl.java  — WebClient → Gemini, retry logic, validate
 │
 └── module/geocoding/
     ├── dto/
     │   └── GeocodingResult.java       — Record: placeId, name, formattedAddress, lat, lng, provider
+    ├── client/
+    │   ├── GoongClient.java           — HTTP client → Goong REST API
+    │   └── SerpApiClient.java         — HTTP client → SerpApi (enrichment)
     └── service/
         ├── GeocodingService.java      — Interface: searchPlace(query, destination)
         └── impl/
-            └── GooglePlacesGeocodingService.java  — WebClient → Google Places API New
+            └── GoongGeocodingService.java  — Goong geocoding (PlaceCache + SerpApi enrichment)
 ```
 
 ### File sửa — Backend
@@ -104,11 +110,11 @@ src/main/java/com/tranbac/chiptripbe/
 |---|---|
 | `module/ai/dto/AiItineraryResult.java` | `AiActivity`: bỏ `latitude/longitude`, thêm `searchQuery` |
 | `module/ai/service/impl/AiGenerateServiceImpl.java` | Schema, prompt, validation searchQuery |
-| `module/trip/entity/Activity.java` | Thêm: `searchQuery`, `placeId`, `formattedAddress`, `geocodingProvider` |
-| `module/trip/service/impl/TripServiceImpl.java` | Xóa mock; inject AiService + GeocodingService; log AiUsage |
+| `module/trip/entity/Activity.java` | Thêm: `searchQuery`, `placeId`, `formattedAddress`, `geocodingProvider`, `placeCacheId` |
+| `module/trip/service/impl/TripServiceImpl.java` | Xóa mock; inject AiService + PlaceEnrichmentService; log AiUsage |
 | `common/exception/AppException.java` | Thêm `internal()` factory |
-| `src/main/resources/application.yml` | Thêm `app.ai.*` và `app.geocoding.*` |
-| `.env.example` | Document `OPENAI_API_KEY`, `GOOGLE_MAPS_API_KEY` |
+| `src/main/resources/application.yml` | Thêm `app.ai.*`, `app.goong.*`, `app.serpapi.*` |
+| `.env.example` | Document `GEMINI_API_KEY`, `GOONG_API_KEY`, `SERPAPI_API_KEY` |
 
 ### File sửa — Frontend
 
@@ -130,11 +136,15 @@ DB_PASSWORD=
 # JWT
 JWT_SECRET=
 
-# OpenAI — bắt buộc cho AI generate
-OPENAI_API_KEY=sk-...
+# Gemini — bắt buộc cho AI generate
+GEMINI_API_KEY=AIza...
 
-# Google Maps — bắt buộc cho geocoding (Places API New)
-GOOGLE_MAPS_API_KEY=AIza...
+# Goong — bắt buộc cho geocoding + autocomplete (Goong REST API)
+GOONG_API_KEY=
+GOONG_MAP_TOKEN=
+
+# SerpApi — enrichment (rating, giờ mở cửa, ảnh); để trống nếu không dùng
+SERPAPI_API_KEY=
 ```
 
 ---
@@ -144,20 +154,25 @@ GOOGLE_MAPS_API_KEY=AIza...
 ```yaml
 app:
   ai:
-    openai:
-      api-key: ${OPENAI_API_KEY}
-      model: gpt-4o-mini
-      base-url: https://api.openai.com/v1
+    gemini:
+      api-key: ${GEMINI_API_KEY}
+      model: gemini-2.5-flash
+      base-url: https://generativelanguage.googleapis.com/v1beta
     max-retries: 2
     timeout-seconds: 60
     pricing:
-      input-usd-per-1m: 0.15
-      output-usd-per-1m: 0.60
-  geocoding:
-    provider: google
-    google:
-      api-key: ${GOOGLE_MAPS_API_KEY}
-      base-url: https://places.googleapis.com/v1
+      input-usd-per-1m: 0.075
+      output-usd-per-1m: 0.30
+  goong:
+    api-key: ${GOONG_API_KEY}
+    base-url: https://rsapi.goong.io
+    timeout-seconds: 5
+  serpapi:
+    api-key: ${SERPAPI_API_KEY:}
+    base-url: https://serpapi.com
+    timeout-seconds: 10
+    enabled: true
+    cache-ttl-days: 30
 ```
 
 ---
@@ -201,7 +216,7 @@ app:
 
 ## Logic geocode
 
-| ActivityType | Gọi Google Places? |
+| ActivityType | Gọi Goong? |
 |---|---|
 | `FOOD` | Có |
 | `ATTRACTION` | Có |
@@ -209,31 +224,32 @@ app:
 | `TRANSPORT` | Không |
 | `OTHER` | Không |
 
-- Nếu Google Places trả về kết quả → lưu `latitude`, `longitude`, `placeId`, `formattedAddress`, `geocodingProvider = "google"`
+- Nếu Goong trả về kết quả → lưu `latitude`, `longitude`, `placeId`, `formattedAddress`, `geocodingProvider = "goong"`, `placeCacheId`
+- SerpApi enrich thêm rating / giờ mở cửa / ảnh và cache vào `PlaceCache` (TTL `cache-ttl-days`)
 - Nếu không tìm thấy hoặc lỗi → `latitude/longitude = null`, không throw exception (graceful fallback)
-- Query gửi đi: `"<searchQuery>, <destination>, Việt Nam"` (append destination nếu chưa có trong query)
+- Query gửi đi: `"<searchQuery>, <destination>"` (append destination nếu chưa có trong query)
 
 ---
 
 ## Retry & Error handling
 
-### AI (OpenAI)
+### AI (Gemini)
 | Trường hợp | Hành vi |
 |---|---|
 | 400 Bad Request | Không retry → throw `AppException.badRequest` |
-| 401 Unauthorized | Không retry → throw `AppException.badRequest` (API key sai) |
+| 401 / 403 | Không retry → throw `AppException.badRequest` (API key sai) |
 | 429 / 5xx | Retry tối đa `max-retries` lần |
 | Timeout (60s) | Retry |
 | JSON parse fail | Retry |
 | Validate fail (days rỗng, thiếu searchQuery...) | Retry |
 | Hết retry | Throw `AppException.internal` |
 
-### Geocoding (Google Places)
+### Geocoding (Goong + SerpApi)
 | Trường hợp | Hành vi |
 |---|---|
-| Không tìm thấy địa điểm | Trả `null`, lat/lng = null |
-| Timeout (5s) | Bắt exception, log warn, trả `null` |
-| Lỗi HTTP bất kỳ | Bắt exception, log warn, trả `null` |
+| Không tìm thấy địa điểm | Trả `Optional.empty()`, lat/lng = null |
+| Timeout (5s) | Bắt exception, log warn, trả `Optional.empty()` |
+| Lỗi HTTP bất kỳ | Bắt exception, log warn, trả `Optional.empty()` |
 
 ---
 
@@ -243,10 +259,10 @@ Sau mỗi lần generate thành công, lưu vào bảng `ai_usages`:
 
 | Field | Giá trị |
 |---|---|
-| `provider` | `"openai"` |
-| `tokensIn` | `usage.prompt_tokens` từ response |
-| `tokensOut` | `usage.completion_tokens` từ response |
-| `costUsd` | `tokensIn/1M * 0.15 + tokensOut/1M * 0.60` |
+| `provider` | `"gemini"` |
+| `tokensIn` | `usageMetadata.promptTokenCount` từ response |
+| `tokensOut` | `usageMetadata.candidatesTokenCount` từ response |
+| `costUsd` | `tokensIn/1M * 0.075 + tokensOut/1M * 0.30` |
 | `userId` | ID người dùng gọi API |
 | `tripId` | ID trip vừa tạo |
 
