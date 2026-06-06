@@ -11,7 +11,22 @@ import java.util.List;
 import java.util.Optional;
 
 public interface PlaceCacheRepository extends JpaRepository<PlaceCache, Long> {
-    Optional<PlaceCache> findByNormalizedName(String normalizedName);
+
+    /**
+     * Lookup theo cặp (normalizedName, normalizedDestination) — tránh nhầm cùng
+     * tên giữa các tỉnh/thành. Trả first row để an toàn với dữ liệu cũ có thể trùng.
+     */
+    Optional<PlaceCache> findFirstByNormalizedNameAndNormalizedDestination(
+            String normalizedName, String normalizedDestination);
+
+    /** Fallback cho dữ liệu cũ chưa có normalizedDestination. */
+    Optional<PlaceCache> findFirstByNormalizedNameAndNormalizedDestinationIsNull(String normalizedName);
+
+    /**
+     * An toàn với duplicate goong_place_id trong DB (tránh NonUniqueResultException).
+     * Lấy row mới nhất theo id.
+     */
+    Optional<PlaceCache> findFirstByGoongPlaceIdOrderByIdDesc(String goongPlaceId);
 
     /**
      * Trả về cache row "tốt nhất" cho 1 goongPlaceId, theo thứ tự ưu tiên:

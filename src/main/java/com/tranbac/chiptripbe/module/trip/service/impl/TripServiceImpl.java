@@ -2,19 +2,16 @@ package com.tranbac.chiptripbe.module.trip.service.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.tranbac.chiptripbe.common.config.AiProperties;
 import com.tranbac.chiptripbe.common.enums.ActivityType;
-import com.tranbac.chiptripbe.common.enums.ChecklistCategory;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
-import com.tranbac.chiptripbe.module.ai.entity.AiUsage;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
+import com.tranbac.chiptripbe.module.ai.service.AiItineraryValidator;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
-import com.tranbac.chiptripbe.module.notification.event.AiCreditsLowEvent;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
-import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
+import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateTripRequest;
@@ -32,23 +29,20 @@ import com.tranbac.chiptripbe.module.trip.repository.ChecklistItemRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripDayRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripMemberRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
+import com.tranbac.chiptripbe.module.trip.service.TripGenerationPersistenceService;
 import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
 import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
-import java.time.LocalTime;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 @Slf4j
@@ -65,16 +59,43 @@ class TripServiceImpl implements TripService {
     private final TripMemberService tripMemberService;
     private final UserRepository userRepository;
     private final AiService aiService;
+    private final AiItineraryValidator aiItineraryValidator;
     private final AiUsageRepository aiUsageRepository;
-    private final AiProperties aiProperties;
     private final ObjectMapper objectMapper;
     private final PlaceEnrichmentService placeEnrichmentService;
     private final PlaceCacheRepository placeCacheRepository;
-    private final ApplicationEventPublisher eventPublisher;
+    private final TripGenerationPersistenceService tripGenerationPersistenceService;
 
+    /**
+     * Orchestration only — KHÔNG annotate @Transactional.
+     * Tránh giữ DB transaction trong khi gọi Gemini và resolve place (HTTP calls dài).
+     *
+     * Flow:
+     * 1. Validate request + read-only check user/credits (mỗi findById tự mở tx ngắn).
+     * 2. Gọi AI ngoài transaction.
+     * 3. Validate AI output (fail-fast nếu invalid — không tốn lượt AI, không persist trip rác).
+     * 4. Resolve place (mỗi resolvePlace tự mở tx ngắn để upsert PlaceCache).
+     * 5. Persist trip + days + activities + checklist + AiUsage trong 1 tx ngắn.
+     *
+     * propagation = NOT_SUPPORTED để override class-level @Transactional(readOnly=true) —
+     * tránh giữ DB connection trong khi gọi Gemini.
+     */
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public TripGenerateResponse generateTrip(Long userId, GenerateTripRequest request) {
+        validateRequestAndCredits(userId, request);
+
+        AiCallResult aiCallResult = aiService.generateItinerary(request);
+        aiItineraryValidator.validate(aiCallResult.itinerary(), request);
+
+        Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces =
+                resolvePlaces(aiCallResult.itinerary(), request.getDestination());
+
+        return tripGenerationPersistenceService.persistGeneratedTrip(
+                userId, request, aiCallResult, resolvedPlaces);
+    }
+
+    private void validateRequestAndCredits(Long userId, GenerateTripRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
 
@@ -89,199 +110,28 @@ class TripServiceImpl implements TripService {
         if (!request.getEndDate().isAfter(request.getStartDate())) {
             throw AppException.badRequest("Ngày kết thúc phải sau ngày bắt đầu");
         }
+    }
 
-        // Gọi AI — thực hiện trước khi ghi DB để không giữ transaction trong khi chờ HTTP
-        AiCallResult aiCallResult = aiService.generateItinerary(request);
-        AiItineraryResult itinerary = aiCallResult.itinerary();
+    /**
+     * Resolve place cho mỗi activity cần geocode. Identity-keyed map để persist service
+     * dò ngược lại theo reference (AiActivity instance) — đơn giản hơn lưu index.
+     */
+    private Map<AiItineraryResult.AiActivity, PlaceCache> resolvePlaces(AiItineraryResult itinerary, String destination) {
+        Map<AiItineraryResult.AiActivity, PlaceCache> resolved = new IdentityHashMap<>();
+        if (itinerary.getDays() == null) return resolved;
 
-        // Styles JSON
-        List<String> styleList = request.getStyles() != null ? request.getStyles() : List.of();
-        String stylesJson;
-        try {
-            stylesJson = objectMapper.writeValueAsString(styleList);
-        } catch (JsonProcessingException e) {
-            stylesJson = "[]";
-        }
+        for (AiItineraryResult.AiDay day : itinerary.getDays()) {
+            if (day.getActivities() == null) continue;
+            for (AiItineraryResult.AiActivity act : day.getActivities()) {
+                ActivityType type = parseActivityType(act.getType());
+                if (!shouldGeocode(type)) continue;
+                if (act.getSearchQuery() == null || act.getSearchQuery().isBlank()) continue;
 
-        // Title: ưu tiên title từ AI, fallback destination + số ngày
-        String title = (itinerary.getTitle() != null && !itinerary.getTitle().isBlank())
-                ? itinerary.getTitle()
-                : request.getDestination() + " "
-                  + (ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + 1)
-                  + " ngày";
-
-        Trip trip = Trip.builder()
-                .user(user)
-                .title(title)
-                .departure(request.getDeparture())
-                .destination(request.getDestination())
-                .dateStart(request.getStartDate())
-                .dateEnd(request.getEndDate())
-                .peopleCount(request.getPeopleCount())
-                .budgetVnd(request.getBudgetVnd())
-                .styles(stylesJson)
-                .build();
-        trip = tripRepository.save(trip);
-        tripMemberService.seedOwner(trip, user);
-
-        // Map AI days → entities
-        long totalCost = 0;
-        List<TripGenerateResponse.DayDetail> dayDetails = new ArrayList<>();
-
-        for (AiItineraryResult.AiDay aiDay : itinerary.getDays()) {
-            LocalDate dayDate;
-            try {
-                dayDate = LocalDate.parse(aiDay.getDate());
-            } catch (Exception e) {
-                dayDate = request.getStartDate().plusDays(aiDay.getDayNumber() - 1);
+                placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination)
+                        .ifPresent(place -> resolved.put(act, place));
             }
-
-            TripDay day = TripDay.builder()
-                    .trip(trip)
-                    .dayNumber(aiDay.getDayNumber())
-                    .date(dayDate)
-                    .build();
-            day = tripDayRepository.save(day);
-
-            List<TripGenerateResponse.ActivityDetail> activityDetails = new ArrayList<>();
-            long dayCost = 0;
-            int order = 1;
-
-            for (AiItineraryResult.AiActivity aiActivity : aiDay.getActivities()) {
-                LocalTime startTime;
-                try {
-                    startTime = LocalTime.parse(aiActivity.getTime());
-                } catch (Exception e) {
-                    startTime = LocalTime.of(8, 0);
-                }
-
-                long cost = aiActivity.getCostVnd() != null ? Math.max(0, aiActivity.getCostVnd()) : 0L;
-                dayCost += cost;
-
-                ActivityType activityType = parseActivityType(aiActivity.getType());
-
-                BigDecimal latitude = null;
-                BigDecimal longitude = null;
-                String placeId = null;
-                String formattedAddress = null;
-                String geocodingProvider = null;
-                Long placeCacheId = null;
-
-                String activityImageUrl = null;
-                if (shouldGeocode(activityType) && aiActivity.getSearchQuery() != null && !aiActivity.getSearchQuery().isBlank()) {
-                    Optional<PlaceCache> place = placeEnrichmentService.resolvePlace(
-                            aiActivity.getSearchQuery(), request.getDestination());
-                    if (place.isPresent()) {
-                        PlaceCache p = place.get();
-                        latitude = p.getLatitude();
-                        longitude = p.getLongitude();
-                        placeId = p.getGoongPlaceId();
-                        formattedAddress = p.getAddress();
-                        geocodingProvider = "goong";
-                        placeCacheId = p.getId();
-                        activityImageUrl = extractFirstPhotoUrl(p.getPhotosJson());
-                    }
-                }
-
-                Activity activity = Activity.builder()
-                        .day(day)
-                        .displayOrder(order++)
-                        .startTime(startTime)
-                        .name(aiActivity.getName())
-                        .description(aiActivity.getDescription())
-                        .type(activityType)
-                        .costVnd(cost)
-                        .latitude(latitude)
-                        .longitude(longitude)
-                        .searchQuery(aiActivity.getSearchQuery())
-                        .placeId(placeId)
-                        .formattedAddress(formattedAddress)
-                        .geocodingProvider(geocodingProvider)
-                        .placeCacheId(placeCacheId)
-                        .imageUrl(activityImageUrl)
-                        .bookingUrl(aiActivity.getBookingUrl())
-                        .build();
-                activity = activityRepository.save(activity);
-                activityDetails.add(toActivityDetail(activity));
-            }
-
-            totalCost += dayCost;
-            dayDetails.add(TripGenerateResponse.DayDetail.builder()
-                    .id(day.getId())
-                    .dayNumber(day.getDayNumber())
-                    .date(day.getDate())
-                    .dayCostVnd(dayCost)
-                    .activities(activityDetails)
-                    .build());
         }
-
-        // Map AI checklist → entities
-        List<TripGenerateResponse.ChecklistDetail> checklistDetails = new ArrayList<>();
-        int checklistOrder = 0;
-        for (AiItineraryResult.AiChecklistItem aiItem : itinerary.getChecklist()) {
-            ChecklistItem item = ChecklistItem.builder()
-                    .trip(trip)
-                    .category(parseChecklistCategory(aiItem.getCategory()))
-                    .name(aiItem.getName())
-                    .isChecked(false)
-                    .displayOrder(checklistOrder)
-                    .build();
-            checklistItemRepository.save(item);
-            checklistDetails.add(TripGenerateResponse.ChecklistDetail.builder()
-                    .id(item.getId())
-                    .category(item.getCategory().name())
-                    .name(item.getName())
-                    .isChecked(false)
-                    .displayOrder(checklistOrder)
-                    .build());
-            checklistOrder++;
-        }
-
-        // Trừ AI credits sau khi persist thành công
-        int remainingCredits = user.getAiCredits() - 1;
-        user.setAiCredits(remainingCredits);
-        userRepository.save(user);
-
-        // Cảnh báo khi credits thấp (sau khi trừ còn 0 hoặc 1) — publish event để
-        // listener AFTER_COMMIT chỉ tạo noti khi toàn bộ transaction này thành công.
-        if (remainingCredits <= 1) {
-            eventPublisher.publishEvent(new AiCreditsLowEvent(userId, remainingCredits));
-        }
-
-        // Log AI usage
-        BigDecimal costUsd = BigDecimal.valueOf(
-                (double) aiCallResult.promptTokens() / 1_000_000 * aiProperties.getPricing().getInputUsdPer1m()
-                + (double) aiCallResult.completionTokens() / 1_000_000 * aiProperties.getPricing().getOutputUsdPer1m()
-        ).setScale(6, RoundingMode.HALF_UP);
-
-        aiUsageRepository.save(AiUsage.builder()
-                .user(user)
-                .trip(trip)
-                .provider("gemini")
-                .tokensIn(aiCallResult.promptTokens())
-                .tokensOut(aiCallResult.completionTokens())
-                .costUsd(costUsd)
-                .build());
-
-        log.info("Generated trip id={} for userId={} with {} days via AI (tokens: {}+{})",
-                trip.getId(), userId, dayDetails.size(),
-                aiCallResult.promptTokens(), aiCallResult.completionTokens());
-
-        return TripGenerateResponse.builder()
-                .id(trip.getId())
-                .title(trip.getTitle())
-                .departure(trip.getDeparture())
-                .destination(trip.getDestination())
-                .dateStart(trip.getDateStart())
-                .dateEnd(trip.getDateEnd())
-                .peopleCount(trip.getPeopleCount())
-                .budgetVnd(trip.getBudgetVnd())
-                .styles(trip.getStyles())
-                .createdAt(trip.getCreatedAt())
-                .totalCostVnd(totalCost)
-                .days(dayDetails)
-                .checklist(checklistDetails)
-                .build();
+        return resolved;
     }
 
     @Override
@@ -524,10 +374,6 @@ class TripServiceImpl implements TripService {
                 .build();
     }
 
-    private TripSummaryResponse toSummaryResponse(Trip trip) {
-        return toSummaryResponse(trip, null);
-    }
-
     private TripSummaryResponse toSummaryResponse(Trip trip, String imageUrl) {
         return TripSummaryResponse.builder()
                 .id(trip.getId())
@@ -548,8 +394,12 @@ class TripServiceImpl implements TripService {
                 .build();
     }
 
+    /** FOOD, ATTRACTION, ACCOMMODATION, TRANSPORT đều cần geocode khi có searchQuery. OTHER bỏ qua. */
     private boolean shouldGeocode(ActivityType type) {
-        return type == ActivityType.FOOD || type == ActivityType.ATTRACTION || type == ActivityType.ACCOMMODATION;
+        return type == ActivityType.FOOD
+                || type == ActivityType.ATTRACTION
+                || type == ActivityType.ACCOMMODATION
+                || type == ActivityType.TRANSPORT;
     }
 
     private ActivityType parseActivityType(String type) {
@@ -559,33 +409,6 @@ class TripServiceImpl implements TripService {
         } catch (IllegalArgumentException e) {
             return ActivityType.OTHER;
         }
-    }
-
-    private ChecklistCategory parseChecklistCategory(String category) {
-        if (category == null) return ChecklistCategory.OTHER;
-        try {
-            return ChecklistCategory.valueOf(category.trim().toUpperCase());
-        } catch (IllegalArgumentException e) {
-            return ChecklistCategory.OTHER;
-        }
-    }
-
-    private TripGenerateResponse.ActivityDetail toActivityDetail(Activity activity) {
-        return TripGenerateResponse.ActivityDetail.builder()
-                .id(activity.getId())
-                .startTime(activity.getStartTime())
-                .name(activity.getName())
-                .description(activity.getDescription())
-                .type(activity.getType())
-                .costVnd(activity.getCostVnd())
-                .latitude(activity.getLatitude())
-                .longitude(activity.getLongitude())
-                .imageUrl(activity.getImageUrl())
-                .bookingUrl(activity.getBookingUrl())
-                .displayOrder(activity.getDisplayOrder())
-                .placeCacheId(activity.getPlaceCacheId())
-                .address(activity.getFormattedAddress())
-                .build();
     }
 
     private TripDetailResponse.ActivityDetail toTripDetailActivityDetail(Activity activity, Map<Long, PlaceCache> cacheMap) {

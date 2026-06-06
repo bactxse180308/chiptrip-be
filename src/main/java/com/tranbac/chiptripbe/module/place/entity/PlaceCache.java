@@ -12,6 +12,8 @@ import java.time.LocalDateTime;
 @Table(name = "place_cache",
     indexes = {
         @Index(name = "ix_place_cache_normalized_name", columnList = "normalized_name"),
+        @Index(name = "ix_place_cache_normalized_name_destination",
+                columnList = "normalized_name, normalized_destination"),
         @Index(name = "ix_place_cache_goong_place_id", columnList = "goong_place_id")
     })
 @Getter
@@ -28,6 +30,10 @@ public class PlaceCache extends BaseAuditEntity {
     /** Tên đã chuẩn hóa (bỏ dấu, lowercase) dùng để tra cứu nhanh */
     @Column(name = "normalized_name", nullable = false, length = 255)
     private String normalizedName;
+
+    /** Destination đã chuẩn hóa — kết hợp với normalizedName để tránh nhầm địa điểm giữa các tỉnh */
+    @Column(name = "normalized_destination", length = 255)
+    private String normalizedDestination;
 
     @Nationalized
     @Column(name = "address", length = 500)
@@ -46,13 +52,31 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "serp_data_id", length = 255)
     private String serpDataId;
 
+    /** place_id của Google từ SerpApi (dạng ChIJ...) */
+    @Column(name = "serp_place_id", length = 255)
+    private String serpPlaceId;
+
+    /** Tên hiển thị trên Google Maps trả về từ SerpApi (giúp debug + đối chiếu) */
+    @Nationalized
+    @Column(name = "serp_title", length = 255)
+    private String serpTitle;
+
+    /** Loại địa điểm theo Google Maps: "Restaurant", "Tourist attraction", ... */
+    @Column(name = "place_type", length = 100)
+    private String placeType;
+
+    /** Chuỗi giờ mở cửa rút gọn (ví dụ "Open ⋅ Closes 10 PM"), thường lấy từ trường "hours" */
+    @Nationalized
+    @Column(name = "hours_text", length = 255)
+    private String hoursText;
+
     @Column(name = "rating", precision = 3, scale = 1)
     private BigDecimal rating;
 
     @Column(name = "review_count")
     private Integer reviewCount;
 
-    /** JSON array các khung giờ mở cửa: [{"day":"Monday","hours":"8:00 AM–9:00 PM"}, ...] */
+    /** JSON object/array thô từ SerpApi field "operating_hours" hoặc "hours.schedule" */
     @Column(name = "opening_hours_json", columnDefinition = "NVARCHAR(MAX)")
     private String openingHoursJson;
 
@@ -82,7 +106,10 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "serp_synced_at", columnDefinition = "DATETIME2")
     private LocalDateTime serpSyncedAt;
 
-    /** True khi SerpApi đã trả về data hữu ích (có rating HOẶC có ảnh). False = cần retry theo backoff. */
+    /**
+     * True khi SerpApi đã trả về data đủ dùng để hiển thị Google Maps card:
+     * basic info (rating/phone/website) + photos + (opening hours hoặc reviews).
+     */
     @Column(name = "serp_enriched", columnDefinition = "bit NOT NULL DEFAULT 0")
     @Builder.Default
     private boolean serpEnriched = false;

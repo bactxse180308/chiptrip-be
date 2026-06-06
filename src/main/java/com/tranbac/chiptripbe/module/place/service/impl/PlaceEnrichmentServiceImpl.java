@@ -13,6 +13,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -46,11 +47,12 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
 
         String cleanedName = cleanPlaceName(placeName);
         String normalized = normalize(cleanedName);
+        String normalizedDestination = normalize(destination);
 
-        // 1. Kiểm tra cache còn fresh theo normalizedName
-        Optional<PlaceCache> fresh = placeCacheService.findFreshCache(normalized);
+        // 1. Cache theo cặp (normalizedName, normalizedDestination)
+        Optional<PlaceCache> fresh = placeCacheService.findFreshCache(normalized, normalizedDestination);
         if (fresh.isPresent()) {
-            log.debug("Place cache hit: '{}'", normalized);
+            log.debug("Place cache hit: name='{}', dest='{}'", normalized, normalizedDestination);
             return fresh;
         }
 
@@ -64,8 +66,14 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
 
         GoongClient.GeocodeResult geo = geoOpt.get();
 
-        // 3. Dedup theo goongPlaceId — nếu đã có row khác với cùng placeId thì tái dùng
-        //    (chỉ tiết kiệm SerpApi khi row đã enrich đủ; nếu chưa, vẫn cần retry SerpApi)
+        // 2b. Verify Goong result match destination — tránh lưu lat/lng tỉnh khác
+        if (!addressMatchesDestination(geo.formattedAddress(), normalizedDestination)) {
+            log.warn("Goong mismatch: query='{}', address='{}', expectedDestination='{}'",
+                    geocodeQuery, geo.formattedAddress(), destination);
+            return Optional.empty();
+        }
+
+        // 3. Dedup theo goongPlaceId (an toàn với duplicate trong DB)
         if (geo.placeId() != null && !geo.placeId().isBlank()) {
             Optional<PlaceCache> byPlaceId = placeCacheRepository.findBestByGoongPlaceId(geo.placeId());
             if (byPlaceId.isPresent() && byPlaceId.get().isSerpEnriched()) {
@@ -74,34 +82,40 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             }
         }
 
-        // 4. Lấy row cũ theo normalizedName nếu có (để update thay vì insert mới)
-        Optional<PlaceCache> existing = placeCacheRepository.findByNormalizedName(normalized);
-        // Hoặc lấy row theo goongPlaceId (trường hợp tên AI sinh khác nhau cho cùng địa điểm)
+        // 4. Lấy row cũ để update thay vì insert mới
+        Optional<PlaceCache> existing = (normalizedDestination == null || normalizedDestination.isBlank())
+                ? placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalized)
+                : placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestination(normalized, normalizedDestination);
         if (existing.isEmpty() && geo.placeId() != null && !geo.placeId().isBlank()) {
             existing = placeCacheRepository.findBestByGoongPlaceId(geo.placeId());
         }
 
         PlaceCache.PlaceCacheBuilder builder = existing
                 .map(PlaceCache::toBuilder)
-                .orElseGet(() -> PlaceCache.builder().normalizedName(normalized).name(cleanedName));
+                .orElseGet(() -> PlaceCache.builder()
+                        .normalizedName(normalized)
+                        .normalizedDestination(normalizedDestination)
+                        .name(cleanedName));
 
-        builder.latitude(geo.lat())
+        // Đảm bảo các field key luôn có
+        builder.normalizedName(normalized)
+                .normalizedDestination(normalizedDestination)
+                .latitude(geo.lat())
                 .longitude(geo.lng())
                 .goongPlaceId(geo.placeId())
                 .address(geo.formattedAddress())
                 .lastSyncedAt(LocalDateTime.now());
 
-        // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu dữ liệu Goong)
-        SerpEnrichOutcome outcome = enrichWithSerpApi(builder, cleanedName, destination, placeName);
+        // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu data Goong)
+        SerpEnrichOutcome outcome = enrichWithSerpApi(builder, cleanedName, destination, normalizedDestination, geo, placeName);
         builder.serpEnriched(outcome.enriched());
         builder.serpSyncedAt(outcome.syncedAt());
 
         PlaceCache toSave = builder.build();
         try {
-            // Lưu trong REQUIRES_NEW (xem PlaceCacheServiceImpl.save) — race condition trên
-            // unique index goong_place_id chỉ rollback tx con, tx ngoài vẫn an toàn.
             PlaceCache saved = placeCacheService.save(toSave);
-            log.debug("Saved place cache id={} normalized='{}' serpEnriched={}", saved.getId(), normalized, outcome.enriched());
+            log.debug("Saved place cache id={} normalized='{}' dest='{}' serpEnriched={}",
+                    saved.getId(), normalized, normalizedDestination, outcome.enriched());
             return Optional.of(saved);
         } catch (DataIntegrityViolationException ex) {
             String placeId = toSave.getGoongPlaceId();
@@ -114,53 +128,68 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     private record SerpEnrichOutcome(boolean enriched, LocalDateTime syncedAt) {}
 
     /**
-     * Gọi SerpApi và set các field enrich lên builder.
-     * - enriched=true khi có rating HOẶC photos không rỗng → cache OK trong TTL
-     * - enriched=false + syncedAt=now() khi attempt được nhưng không có data → áp dụng backoff
-     * - enriched=false + syncedAt=null khi exception (chưa thật sự attempt được) → retry ngay lần sau
+     * Gọi SerpApi, chọn candidate khớp nhất, set field enrich lên builder.
+     * Tiêu chí "enriched" mới: hasBasic && hasPhotos && (hasOpeningHours || hasReviews).
      */
     private SerpEnrichOutcome enrichWithSerpApi(PlaceCache.PlaceCacheBuilder builder,
                                                 String cleanedName,
                                                 String destination,
+                                                String normalizedDestination,
+                                                GoongClient.GeocodeResult geo,
                                                 String originalName) {
         try {
             String serpQuery = cleanedName + (destination != null ? " " + destination : "") + " Việt Nam";
-            Optional<SerpApiClient.PlaceData> serpOpt = serpApiClient.searchPlace(serpQuery);
-            if (serpOpt.isEmpty()) {
-                log.debug("SerpApi không trả về data cho '{}', áp dụng backoff", serpQuery);
+            List<SerpApiClient.PlaceData> candidates = serpApiClient.searchPlaceCandidates(serpQuery);
+            if (candidates.isEmpty()) {
+                log.debug("SerpApi không trả về candidate cho '{}', áp dụng backoff", serpQuery);
                 return new SerpEnrichOutcome(false, LocalDateTime.now());
             }
 
-            SerpApiClient.PlaceData s = serpOpt.get();
+            SerpApiClient.PlaceData s = pickBestCandidate(candidates, cleanedName, normalizedDestination, geo);
+            if (s == null) {
+                log.warn("SerpApi: không có candidate khớp destination='{}' cho query='{}' ({} candidates) — bỏ qua enrichment",
+                        destination, serpQuery, candidates.size());
+                return new SerpEnrichOutcome(false, LocalDateTime.now());
+            }
+
             builder.serpDataId(s.dataId())
+                    .serpPlaceId(s.placeId())
+                    .serpTitle(s.title())
+                    .placeType(s.type())
                     .rating(s.rating())
                     .reviewCount(s.reviewCount())
-                    .openingHoursJson(s.openingHoursJson())
-                    .openState(s.openNow() != null ? (s.openNow() ? "OPEN" : "CLOSED") : null)
+                    .openingHoursJson(s.operatingHoursJson())
+                    .openState(resolveOpenState(s))
+                    .hoursText(s.hours())
                     .phone(s.phone())
                     .website(s.website());
 
+            String photosId = s.dataId() != null ? s.dataId() : s.placeId();
             List<Map<String, String>> photos = List.of();
-            if (s.dataId() != null && !s.dataId().isBlank()) {
-                photos = safeFetchPhotos(s.dataId());
+            if (photosId != null && !photosId.isBlank()) {
+                photos = safeFetchPhotos(photosId);
             }
 
+            boolean photosWritten = false;
             if (photos != null && !photos.isEmpty()) {
                 try {
                     builder.photosJson(objectMapper.writeValueAsString(photos));
+                    photosWritten = true;
                 } catch (Exception ex) {
                     log.warn("Failed to serialize photos list to JSON: {}", ex.getMessage());
-                    if (s.thumbnailUrl() != null) {
-                        builder.photosJson(buildPhotosJson(s.thumbnailUrl()));
-                    }
                 }
-            } else if (s.thumbnailUrl() != null) {
-                builder.photosJson(buildPhotosJson(s.thumbnailUrl()));
+            }
+            if (!photosWritten && s.thumbnailUrl() != null) {
+                String fallback = buildPhotosJson(s.thumbnailUrl());
+                if (fallback != null) {
+                    builder.photosJson(fallback);
+                }
             }
 
+            String reviewsId = s.dataId() != null ? s.dataId() : s.placeId();
             List<Map<String, Object>> reviews = List.of();
-            if (s.dataId() != null && !s.dataId().isBlank()) {
-                reviews = safeFetchReviews(s.dataId());
+            if (reviewsId != null && !reviewsId.isBlank()) {
+                reviews = safeFetchReviews(reviewsId);
             }
             if (reviews != null && !reviews.isEmpty()) {
                 try {
@@ -170,14 +199,20 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 }
             }
 
+            boolean hasBasic = s.rating() != null || s.reviewCount() != null
+                    || s.phone() != null || s.website() != null;
             boolean hasPhotos = (photos != null && !photos.isEmpty()) || s.thumbnailUrl() != null;
-            boolean enriched = s.rating() != null || hasPhotos;
+            boolean hasOpeningHours = s.operatingHoursJson() != null
+                    || s.hours() != null || s.openState() != null;
+            boolean hasReviews = reviews != null && !reviews.isEmpty();
+            boolean enriched = hasBasic && hasPhotos && (hasOpeningHours || hasReviews);
 
-            log.info("SerpApi enrich result: name='{}', rating={}, reviewCount={}, dataId={}, photosCount={}, reviewsCount={}, enriched={}",
-                    cleanedName, s.rating(), s.reviewCount(), s.dataId(),
+            log.info("SerpApi enrich: name='{}', title='{}', rating={}, reviewCount={}, dataId={}, placeId={}, "
+                            + "photosCount={}, reviewsCount={}, hasBasic={}, hasPhotos={}, hasOpeningHours={}, hasReviews={}, enriched={}",
+                    cleanedName, s.title(), s.rating(), s.reviewCount(), s.dataId(), s.placeId(),
                     photos != null ? photos.size() : 0,
                     reviews != null ? reviews.size() : 0,
-                    enriched);
+                    hasBasic, hasPhotos, hasOpeningHours, hasReviews, enriched);
 
             return new SerpEnrichOutcome(enriched, LocalDateTime.now());
 
@@ -185,6 +220,107 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             log.warn("SerpApi enrich failed for '{}', dùng Goong-only data: {}", originalName, e.getMessage());
             return new SerpEnrichOutcome(false, null);
         }
+    }
+
+    /**
+     * Ưu tiên candidate có address chứa destination; tie-break theo title gần cleanedName
+     * và (nếu có gps_coordinates) khoảng cách tới điểm Goong trả về.
+     * Không fallback mù quáng candidate đầu tiên — thà bỏ enrichment còn hơn ghép sai.
+     */
+    private SerpApiClient.PlaceData pickBestCandidate(List<SerpApiClient.PlaceData> candidates,
+                                                      String cleanedName,
+                                                      String normalizedDestination,
+                                                      GoongClient.GeocodeResult geo) {
+        if (candidates.isEmpty()) return null;
+
+        String normalizedClean = normalize(cleanedName);
+
+        SerpApiClient.PlaceData best = null;
+        double bestScore = -1;
+        boolean bestAddressMatches = false;
+
+        for (SerpApiClient.PlaceData c : candidates) {
+            boolean addressMatches = addressMatchesDestination(c.address(), normalizedDestination);
+            double titleScore = titleSimilarity(normalize(c.title()), normalizedClean);
+            double distanceScore = distanceScore(c, geo);
+
+            // Score: ưu tiên address match nhiều hơn title/distance
+            double score = (addressMatches ? 100.0 : 0.0) + titleScore * 10.0 + distanceScore;
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = c;
+                bestAddressMatches = addressMatches;
+            }
+        }
+
+        // Bắt buộc address phải khớp destination, nếu destination biết được
+        if (normalizedDestination != null && !normalizedDestination.isBlank() && !bestAddressMatches) {
+            return null;
+        }
+        return best;
+    }
+
+    private double titleSimilarity(String a, String b) {
+        if (a == null || b == null || a.isBlank() || b.isBlank()) return 0.0;
+        if (a.equals(b)) return 1.0;
+        if (a.contains(b) || b.contains(a)) return 0.8;
+
+        String[] tokensA = a.split("\\s+");
+        String[] tokensB = b.split("\\s+");
+        int matches = 0;
+        for (String ta : tokensA) {
+            for (String tb : tokensB) {
+                if (ta.equals(tb) && ta.length() > 2) {
+                    matches++;
+                    break;
+                }
+            }
+        }
+        int maxTokens = Math.max(tokensA.length, tokensB.length);
+        return maxTokens == 0 ? 0.0 : (double) matches / maxTokens;
+    }
+
+    /**
+     * Score 0..1 dựa trên khoảng cách candidate đến Goong result.
+     * Nếu candidate không có gps → 0. Cùng vị trí → 1; >50km → 0.
+     */
+    private double distanceScore(SerpApiClient.PlaceData c, GoongClient.GeocodeResult geo) {
+        if (c.latitude() == null || c.longitude() == null
+                || geo == null || geo.lat() == null || geo.lng() == null) {
+            return 0.0;
+        }
+        double km = haversineKm(c.latitude(), c.longitude(), geo.lat(), geo.lng());
+        if (km >= 50.0) return 0.0;
+        return 1.0 - (km / 50.0);
+    }
+
+    private double haversineKm(BigDecimal lat1, BigDecimal lng1, BigDecimal lat2, BigDecimal lng2) {
+        double r = 6371.0;
+        double dLat = Math.toRadians(lat2.doubleValue() - lat1.doubleValue());
+        double dLng = Math.toRadians(lng2.doubleValue() - lng1.doubleValue());
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1.doubleValue())) * Math.cos(Math.toRadians(lat2.doubleValue()))
+                * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return r * c;
+    }
+
+    /**
+     * True nếu formattedAddress chứa destination sau normalize.
+     * Trả true khi destination null/blank để không over-reject ở trường hợp không có context.
+     */
+    private boolean addressMatchesDestination(String address, String normalizedDestination) {
+        if (normalizedDestination == null || normalizedDestination.isBlank()) return true;
+        if (address == null || address.isBlank()) return false;
+        String normalizedAddress = normalize(address);
+        return normalizedAddress.contains(normalizedDestination);
+    }
+
+    private String resolveOpenState(SerpApiClient.PlaceData s) {
+        if (s.openState() != null && !s.openState().isBlank()) return s.openState();
+        if (s.openNow() != null) return s.openNow() ? "OPEN" : "CLOSED";
+        return null;
     }
 
     private List<Map<String, String>> safeFetchPhotos(String dataId) {
@@ -212,7 +348,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
      * Dùng để tra cứu và tránh duplicate cache.
      */
     private String normalize(String name) {
-        if (name == null) return "";
+        if (name == null) return null;
         return name.toLowerCase()
                 .replaceAll("[àáạảãâầấậẩẫăằắặẳẵ]", "a")
                 .replaceAll("[èéẹẻẽêềếệểễ]", "e")

@@ -21,9 +21,14 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
 
     @Override
     @Transactional(readOnly = true)
-    public Optional<PlaceCache> findFreshCache(String normalizedName) {
-        return repository.findByNormalizedName(normalizedName)
-                .filter(this::isFresh);
+    public Optional<PlaceCache> findFreshCache(String normalizedName, String normalizedDestination) {
+        if (normalizedName == null || normalizedName.isBlank()) return Optional.empty();
+
+        Optional<PlaceCache> match = (normalizedDestination == null || normalizedDestination.isBlank())
+                ? repository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalizedName)
+                : repository.findFirstByNormalizedNameAndNormalizedDestination(normalizedName, normalizedDestination);
+
+        return match.filter(this::isFresh);
     }
 
     /**

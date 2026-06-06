@@ -11,13 +11,14 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /**
  * Client gọi SerpApi (Google Maps engine) để enrich dữ liệu địa điểm:
- * rating, số review, giờ mở cửa, ảnh thumbnail, phone, website.
+ * rating, số review, giờ mở cửa, ảnh thumbnail, phone, website, place type.
  *
  * Chỉ gọi API khi app.serpapi.enabled=true và có api-key.
  * Nếu SerpApi fail, caller vẫn tiếp tục với dữ liệu từ Goong.
@@ -38,28 +39,43 @@ public class SerpApiClient {
         client = webClientBuilder.baseUrl(properties.getBaseUrl()).build();
     }
 
+    /**
+     * Đầy đủ dữ liệu hiển thị Google Maps card cho 1 ứng viên (candidate)
+     * trong local_results / place_results của SerpApi.
+     */
     public record PlaceData(
             String dataId,
+            String placeId,
+            String title,
+            String type,
+            String address,
             BigDecimal rating,
             Integer reviewCount,
-            String openingHoursJson,
+            String openState,
+            /** Chuỗi rút gọn từ field "hours" (ví dụ "Open ⋅ Closes 10 PM"). */
+            String hours,
+            /** JSON string serialize từ field "operating_hours" (full lịch theo thứ). */
+            String operatingHoursJson,
             Boolean openNow,
             String thumbnailUrl,
             String phone,
-            String website
+            String website,
+            BigDecimal latitude,
+            BigDecimal longitude
     ) {}
 
     /**
-     * Tìm kiếm địa điểm bằng Google Maps Search Results API (engine=google_maps) để lấy place_id và data_id chính xác.
+     * Trả về danh sách ứng viên từ SerpApi (engine=google_maps).
+     * Caller (PlaceEnrichmentService) sẽ chọn ứng viên khớp nhất theo address/title/location.
      */
     @SuppressWarnings("unchecked")
-    public Optional<PlaceData> searchPlace(String query) {
-        if (!properties.isEnabled()) return Optional.empty();
-        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return Optional.empty();
-        if (query == null || query.isBlank()) return Optional.empty();
+    public List<PlaceData> searchPlaceCandidates(String query) {
+        if (!properties.isEnabled()) return List.of();
+        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (query == null || query.isBlank()) return List.of();
 
         try {
-            log.info("SerpApi searchPlace (engine=google_maps) for query='{}'", query);
+            log.info("SerpApi searchPlaceCandidates (engine=google_maps) for query='{}'", query);
             Map<String, Object> resp = client.get()
                     .uri(b -> b.path("/search")
                             .queryParam("engine", "google_maps")
@@ -73,31 +89,39 @@ public class SerpApiClient {
                     .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
                     .block();
 
-            if (resp == null) return Optional.empty();
+            if (resp == null) return List.of();
 
-            // Lấy từ local_results (dạng List) hoặc place_results (dạng Map nếu khớp chính xác 1 địa điểm)
+            List<PlaceData> candidates = new ArrayList<>();
+
             Object localResultsObj = resp.get("local_results");
             if (localResultsObj instanceof List) {
                 List<Map<String, Object>> places = (List<Map<String, Object>>) localResultsObj;
-                if (!places.isEmpty()) {
-                    log.debug("Found place in local_results for query='{}'", query);
-                    Map<String, Object> firstPlace = places.get(0);
-                    return parsePlaceData(firstPlace);
+                for (Map<String, Object> place : places) {
+                    parsePlaceData(place).ifPresent(candidates::add);
                 }
             }
 
-            Object placeResultsObj = resp.get("place_results");
-            if (placeResultsObj instanceof Map) {
-                log.debug("Found place in place_results directly for query='{}'", query);
-                return parsePlaceData((Map<String, Object>) placeResultsObj);
+            if (candidates.isEmpty()) {
+                Object placeResultsObj = resp.get("place_results");
+                if (placeResultsObj instanceof Map) {
+                    parsePlaceData((Map<String, Object>) placeResultsObj).ifPresent(candidates::add);
+                }
             }
 
-            return Optional.empty();
+            return candidates;
 
         } catch (Exception e) {
             log.warn("SerpApi search failed for query='{}': {}", query, e.getMessage());
-            return Optional.empty();
+            return List.of();
         }
+    }
+
+    /**
+     * Backward-compatible: trả về ứng viên đầu tiên. Caller mới nên dùng searchPlaceCandidates().
+     */
+    public Optional<PlaceData> searchPlace(String query) {
+        List<PlaceData> candidates = searchPlaceCandidates(query);
+        return candidates.isEmpty() ? Optional.empty() : Optional.of(candidates.get(0));
     }
 
     /**
@@ -140,7 +164,7 @@ public class SerpApiClient {
                         return null;
                     })
                     .filter(java.util.Objects::nonNull)
-                    .limit(5) // Giới hạn tối đa 5 ảnh để tiết kiệm
+                    .limit(5)
                     .toList();
 
         } catch (Exception e) {
@@ -211,7 +235,7 @@ public class SerpApiClient {
                         return null;
                     })
                     .filter(java.util.Objects::nonNull)
-                    .limit(3) // Lấy tối đa 3 đánh giá thực tế
+                    .limit(3)
                     .toList();
 
         } catch (Exception e) {
@@ -223,82 +247,119 @@ public class SerpApiClient {
     @SuppressWarnings("unchecked")
     private Optional<PlaceData> parsePlaceData(Map<String, Object> p) {
         try {
-            // Lấy ID: ưu tiên data_id, place_id, cid, hoặc lsig
-            String dataId = p.get("data_id") != null ? p.get("data_id").toString() : null;
-            if (dataId == null || dataId.isBlank()) dataId = p.get("place_id") != null ? p.get("place_id").toString() : null;
-            if (dataId == null || dataId.isBlank()) dataId = p.get("cid") != null ? p.get("cid").toString() : null;
-            if (dataId == null || dataId.isBlank()) dataId = p.get("lsig") != null ? p.get("lsig").toString() : null;
+            String title = stringOrNull(p.get("title"));
+            String placeId = stringOrNull(p.get("place_id"));
 
-            BigDecimal rating = null;
-            Object ratingObj = p.get("rating");
-            if (ratingObj instanceof Number) {
-                rating = BigDecimal.valueOf(((Number) ratingObj).doubleValue());
-            } else if (ratingObj instanceof String) {
-                try {
-                    rating = new BigDecimal((String) ratingObj);
-                } catch (Exception ignored) {}
-            }
+            String dataId = stringOrNull(p.get("data_id"));
+            if (dataId == null) dataId = stringOrNull(p.get("cid"));
+            if (dataId == null) dataId = placeId;
 
-            Integer reviewCount = null;
-            Object reviewObj = p.get("reviews");
-            Object reviewsCountObj = p.get("reviews_count");
-            Object reviewsOriginalObj = p.get("reviews_original");
+            String type = stringOrNull(p.get("type"));
+            String address = stringOrNull(p.get("address"));
+            String openState = stringOrNull(p.get("open_state"));
 
-            if (reviewsCountObj instanceof Number) {
-                reviewCount = ((Number) reviewsCountObj).intValue();
-            } else if (reviewsCountObj instanceof String) {
-                try {
-                    reviewCount = Integer.parseInt(((String) reviewsCountObj).replaceAll("[^0-9]", ""));
-                } catch (Exception ignored) {}
-            }
-
-            if (reviewCount == null) {
-                if (reviewObj instanceof Number) {
-                    reviewCount = ((Number) reviewObj).intValue();
-                } else if (reviewObj instanceof String) {
-                    try {
-                        String cleanedReview = ((String) reviewObj).replaceAll("[^0-9]", "");
-                        reviewCount = Integer.parseInt(cleanedReview);
-                    } catch (Exception ignored) {}
-                }
-            }
-
-            if (reviewCount == null && reviewsOriginalObj instanceof String) {
-                try {
-                    String orig = (String) reviewsOriginalObj;
-                    if (orig.contains("K") || orig.contains("k")) {
-                        String numStr = orig.replaceAll("[^0-9.]", "");
-                        double num = Double.parseDouble(numStr);
-                        reviewCount = (int) (num * 1000);
-                    } else {
-                        reviewCount = Integer.parseInt(orig.replaceAll("[^0-9]", ""));
-                    }
-                } catch (Exception ignored) {}
-            }
-
-            String thumbnail = p.get("thumbnail") != null ? p.get("thumbnail").toString() : null;
-            String phone = p.get("phone") != null ? p.get("phone").toString() : null;
-            String website = p.get("website") != null ? p.get("website").toString() : null;
-            String address = p.get("address") != null ? p.get("address").toString() : null;
-
-            Boolean openNow = null;
-            String openingHoursJson = null;
+            String hoursText = null;
             Object hoursObj = p.get("hours");
-            if (hoursObj instanceof Map) {
-                Map<String, Object> hours = (Map<String, Object>) hoursObj;
-                Object openNowObj = hours.get("open_now");
-                if (openNowObj instanceof Boolean) openNow = (Boolean) openNowObj;
-                List<?> schedule = (List<?>) hours.get("schedule");
-                if (schedule != null) {
-                    openingHoursJson = objectMapper.writeValueAsString(schedule);
+            if (hoursObj instanceof String s) {
+                hoursText = s;
+            }
+
+            String operatingHoursJson = null;
+            Object operatingHoursObj = p.get("operating_hours");
+            if (operatingHoursObj != null) {
+                try {
+                    operatingHoursJson = objectMapper.writeValueAsString(operatingHoursObj);
+                } catch (Exception ex) {
+                    log.debug("Failed to serialize operating_hours: {}", ex.getMessage());
                 }
             }
 
-            return Optional.of(new PlaceData(dataId, rating, reviewCount, openingHoursJson, openNow, thumbnail, phone, website));
+            // Legacy: hours object có thể chứa schedule + open_now (engine cũ)
+            Boolean openNow = null;
+            if (hoursObj instanceof Map) {
+                Map<String, Object> hoursMap = (Map<String, Object>) hoursObj;
+                Object openNowObj = hoursMap.get("open_now");
+                if (openNowObj instanceof Boolean) openNow = (Boolean) openNowObj;
+                if (operatingHoursJson == null) {
+                    Object schedule = hoursMap.get("schedule");
+                    if (schedule != null) {
+                        try {
+                            operatingHoursJson = objectMapper.writeValueAsString(schedule);
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+
+            BigDecimal rating = parseBigDecimal(p.get("rating"));
+            Integer reviewCount = parseReviewCount(p);
+
+            String thumbnail = stringOrNull(p.get("thumbnail"));
+            String phone = stringOrNull(p.get("phone"));
+            String website = stringOrNull(p.get("website"));
+
+            BigDecimal lat = null, lng = null;
+            Object gpsObj = p.get("gps_coordinates");
+            if (gpsObj instanceof Map) {
+                Map<String, Object> gps = (Map<String, Object>) gpsObj;
+                lat = parseBigDecimal(gps.get("latitude"));
+                lng = parseBigDecimal(gps.get("longitude"));
+            }
+
+            return Optional.of(new PlaceData(
+                    dataId, placeId, title, type, address,
+                    rating, reviewCount, openState, hoursText, operatingHoursJson,
+                    openNow, thumbnail, phone, website, lat, lng));
 
         } catch (Exception e) {
             log.debug("Failed to parse SerpApi place data: {}", e.getMessage());
             return Optional.empty();
         }
+    }
+
+    private static String stringOrNull(Object o) {
+        if (o == null) return null;
+        String s = o.toString();
+        return s.isBlank() ? null : s;
+    }
+
+    private static BigDecimal parseBigDecimal(Object o) {
+        if (o instanceof Number n) return BigDecimal.valueOf(n.doubleValue());
+        if (o instanceof String s) {
+            try {
+                return new BigDecimal(s);
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private static Integer parseReviewCount(Map<String, Object> p) {
+        Object reviewsCountObj = p.get("reviews_count");
+        if (reviewsCountObj instanceof Number n) return n.intValue();
+        if (reviewsCountObj instanceof String s) {
+            try {
+                return Integer.parseInt(s.replaceAll("[^0-9]", ""));
+            } catch (Exception ignored) {}
+        }
+
+        Object reviewObj = p.get("reviews");
+        if (reviewObj instanceof Number n) return n.intValue();
+        if (reviewObj instanceof String s) {
+            try {
+                return Integer.parseInt(s.replaceAll("[^0-9]", ""));
+            } catch (Exception ignored) {}
+        }
+
+        Object reviewsOriginalObj = p.get("reviews_original");
+        if (reviewsOriginalObj instanceof String orig) {
+            try {
+                if (orig.contains("K") || orig.contains("k")) {
+                    String numStr = orig.replaceAll("[^0-9.]", "");
+                    double num = Double.parseDouble(numStr);
+                    return (int) (num * 1000);
+                }
+                return Integer.parseInt(orig.replaceAll("[^0-9]", ""));
+            } catch (Exception ignored) {}
+        }
+        return null;
     }
 }

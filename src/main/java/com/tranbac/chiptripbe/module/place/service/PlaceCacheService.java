@@ -7,10 +7,10 @@ import java.util.Optional;
 public interface PlaceCacheService {
 
     /**
-     * Tìm cache còn mới theo normalizedName.
+     * Tìm cache còn mới theo (normalizedName, normalizedDestination).
      * Trả Optional.empty() nếu không có hoặc cache đã quá ttlDays ngày.
      */
-    Optional<PlaceCache> findFreshCache(String normalizedName);
+    Optional<PlaceCache> findFreshCache(String normalizedName, String normalizedDestination);
 
     PlaceCache save(PlaceCache place);
 }

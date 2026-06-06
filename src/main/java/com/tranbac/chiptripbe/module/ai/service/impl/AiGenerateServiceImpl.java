@@ -285,9 +285,10 @@ class AiGenerateServiceImpl implements AiService {
         }
     }
 
-    /** FOOD, ATTRACTION, ACCOMMODATION cần geocode. TRANSPORT và OTHER bỏ qua. */
+    /** FOOD, ATTRACTION, ACCOMMODATION, TRANSPORT đều cần searchQuery để geocode. OTHER bỏ qua. */
     static boolean isGeocodableType(String type) {
-        return "FOOD".equals(type) || "ATTRACTION".equals(type) || "ACCOMMODATION".equals(type);
+        return "FOOD".equals(type) || "ATTRACTION".equals(type)
+                || "ACCOMMODATION".equals(type) || "TRANSPORT".equals(type);
     }
 
     // ─── Internal exception types ─────────────────────────────────────────────
