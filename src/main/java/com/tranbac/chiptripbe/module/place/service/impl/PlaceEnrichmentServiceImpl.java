@@ -11,6 +11,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -40,8 +41,12 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         return cleaned;
     }
 
+    /**
+     * NOT_SUPPORTED: không mở tx bao quanh Goong/SerpApi HTTP calls.
+     * Việc save PlaceCache đã mở tx riêng qua PlaceCacheService.save() (REQUIRES_NEW).
+     */
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public Optional<PlaceCache> resolvePlace(String placeName, String destination) {
         if (placeName == null || placeName.isBlank()) return Optional.empty();
 

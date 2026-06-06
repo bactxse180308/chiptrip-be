@@ -107,14 +107,17 @@ class TripServiceImpl implements TripService {
         if (request.getStartDate().isBefore(today)) {
             throw AppException.badRequest("Ngày bắt đầu không được trước ngày hôm nay");
         }
-        if (!request.getEndDate().isAfter(request.getStartDate())) {
-            throw AppException.badRequest("Ngày kết thúc phải sau ngày bắt đầu");
+        if (request.getEndDate().isBefore(request.getStartDate())) {
+            throw AppException.badRequest("Ngày kết thúc không được trước ngày bắt đầu");
         }
     }
 
     /**
      * Resolve place cho mỗi activity cần geocode. Identity-keyed map để persist service
      * dò ngược lại theo reference (AiActivity instance) — đơn giản hơn lưu index.
+     *
+     * Fail-soft: 1 activity resolve fail không làm fail toàn bộ generate trip.
+     * Trip vẫn được tạo, activity chỉ thiếu location/enrichment.
      */
     private Map<AiItineraryResult.AiActivity, PlaceCache> resolvePlaces(AiItineraryResult itinerary, String destination) {
         Map<AiItineraryResult.AiActivity, PlaceCache> resolved = new IdentityHashMap<>();
@@ -127,8 +130,13 @@ class TripServiceImpl implements TripService {
                 if (!shouldGeocode(type)) continue;
                 if (act.getSearchQuery() == null || act.getSearchQuery().isBlank()) continue;
 
-                placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination)
-                        .ifPresent(place -> resolved.put(act, place));
+                try {
+                    placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination)
+                            .ifPresent(place -> resolved.put(act, place));
+                } catch (Exception e) {
+                    log.warn("Resolve place failed (skip): activity='{}', searchQuery='{}', error={}",
+                            act.getName(), act.getSearchQuery(), e.getMessage());
+                }
             }
         }
         return resolved;

@@ -105,9 +105,13 @@ public class AiItineraryValidator {
                     throw badAi("Activity '" + activity.getName() + "' có time không hợp lệ: " + activity.getTime());
                 }
 
-                if (activity.getType() == null || !ALLOWED_TYPES.contains(activity.getType())) {
+                String normalizedType = activity.getType() == null
+                        ? null
+                        : activity.getType().trim().toUpperCase();
+                if (normalizedType == null || !ALLOWED_TYPES.contains(normalizedType)) {
                     throw badAi("Activity '" + activity.getName() + "' có type không hợp lệ: " + activity.getType());
                 }
+                activity.setType(normalizedType);
 
                 if (activity.getCostVnd() == null) {
                     activity.setCostVnd(0L);
@@ -116,7 +120,7 @@ public class AiItineraryValidator {
                 }
                 totalCost += activity.getCostVnd();
 
-                ActivityType type = ActivityType.valueOf(activity.getType());
+                ActivityType type = ActivityType.valueOf(normalizedType);
                 if (needsSearchQuery(type)) {
                     String q = activity.getSearchQuery();
                     if (q == null || q.isBlank()) {

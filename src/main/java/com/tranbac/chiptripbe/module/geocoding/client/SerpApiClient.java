@@ -127,19 +127,27 @@ public class SerpApiClient {
     /**
      * Lấy danh sách ảnh chi tiết từ SerpApi (google_maps_photos engine).
      * Giới hạn tối đa 5 ảnh để tiết kiệm.
+     *
+     * google_maps_photos engine yêu cầu `data_id` định dạng "0x...:0x..." (hex CID),
+     * KHÔNG nhận place_id dạng "ChI...". Nếu id truyền vào là place_id thì skip để
+     * tránh gọi API sai và lấy phải ảnh của địa điểm khác.
      */
     @SuppressWarnings("unchecked")
-    public List<Map<String, String>> fetchPhotos(String dataId) {
+    public List<Map<String, String>> fetchPhotos(String id) {
         if (!properties.isEnabled()) return List.of();
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
-        if (dataId == null || dataId.isBlank()) return List.of();
+        if (id == null || id.isBlank()) return List.of();
+        if (id.startsWith("ChI")) {
+            log.debug("SerpApi fetchPhotos: id='{}' là place_id, không hợp lệ cho google_maps_photos — skip", id);
+            return List.of();
+        }
 
         try {
-            log.info("SerpApi fetching photos for dataId='{}'", dataId);
+            log.info("SerpApi fetching photos for dataId='{}'", id);
             Map<String, Object> resp = client.get()
                     .uri(b -> b.path("/search")
                             .queryParam("engine", "google_maps_photos")
-                            .queryParam("data_id", dataId)
+                            .queryParam("data_id", id)
                             .queryParam("api_key", properties.getApiKey())
                             .build())
                     .retrieve()
@@ -168,7 +176,7 @@ public class SerpApiClient {
                     .toList();
 
         } catch (Exception e) {
-            log.warn("SerpApi photos fetch failed for dataId='{}': {}", dataId, e.getMessage());
+            log.warn("SerpApi photos fetch failed for dataId='{}': {}", id, e.getMessage());
             return List.of();
         }
     }
