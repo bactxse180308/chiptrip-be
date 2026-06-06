@@ -48,7 +48,7 @@ public class User extends BaseAuditEntity {
     @Column(name = "last_login_at", columnDefinition = "DATETIME2")
     private LocalDateTime lastLoginAt;
 
-    @ManyToOne(fetch = FetchType.EAGER, optional = false)
+    @ManyToOne(fetch = FetchType.EAGER, optional = false,cascade = CascadeType.ALL)
     @JoinColumn(name = "role_id", nullable = false,
             foreignKey = @ForeignKey(name = "fk_users_role"))
     private Role role;

@@ -68,10 +68,24 @@ public class Trip extends BaseAuditEntity {
     @OrderBy("displayOrder ASC")
     @Builder.Default
     private List<ChecklistItem> checklist = new ArrayList<>();
+    // THÊM ĐOẠN NÀY
+    @OneToMany(mappedBy = "trip", cascade = CascadeType.ALL,
+            orphanRemoval = true, fetch = FetchType.LAZY)
+    @Builder.Default
+    private List<TripMember> members = new ArrayList<>();
 
     public void addDay(TripDay day) {
         days.add(day);
         day.setTrip(this);
+    }
+    public void addMember(TripMember member) {
+        members.add(member);
+        member.setTrip(this);
+    }
+
+    public void removeMember(TripMember member) {
+        members.remove(member);
+        member.setTrip(null);
     }
 
     public void addChecklistItem(ChecklistItem item) {

@@ -18,6 +18,8 @@ import org.springframework.context.event.EventListener;
 import org.springframework.messaging.MessagingException;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
@@ -48,6 +50,7 @@ public class NotificationEventListener {
     private static final String ROLE_ADMIN = "ROLE_ADMIN";
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void onTripMemberAdded(TripMemberAddedEvent e) {
         String title = "Bạn được mời vào chuyến đi";
         String body = String.format("%s đã thêm bạn vào '%s'",
@@ -58,6 +61,7 @@ public class NotificationEventListener {
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void onAiCreditsLow(AiCreditsLowEvent e) {
         String title = "Sắp hết lượt AI";
         String body = String.format("Bạn còn %d lượt tạo lịch trình. Nạp thêm để tiếp tục.",
@@ -68,6 +72,7 @@ public class NotificationEventListener {
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void onSupportReply(SupportReplyEvent e) {
         Notification n = notificationService.create(
                 e.recipientUserId(), NotificationType.SUPPORT_REPLY,
@@ -81,6 +86,7 @@ public class NotificationEventListener {
      * user gửi liên tiếp).
      */
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void onNewSupportMessage(NewSupportMessageEvent e) {
         String title = "Tin mới từ " + (e.senderName() != null ? e.senderName() : "khách");
         List<User> admins = userRepository.findAllByRole_NameAndIsActiveTrue(ROLE_ADMIN);

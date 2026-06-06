@@ -56,12 +56,9 @@ class NotificationServiceImpl implements NotificationService {
     @Override
     @Transactional
     public void markRead(Long userId, Long notificationId) {
-        Notification n = notificationRepository.findById(notificationId)
+        // findByIdAndRecipientId handles IDOR in one query — 404 if not found or not owned.
+        Notification n = notificationRepository.findByIdAndRecipientId(notificationId, userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy thông báo"));
-        // Anti-IDOR: notification phải thuộc về user. Trả 404 để không leak existence.
-        if (!n.getRecipient().getId().equals(userId)) {
-            throw AppException.notFound("Không tìm thấy thông báo");
-        }
         if (!n.isRead()) {
             n.setRead(true);
             notificationRepository.save(n);

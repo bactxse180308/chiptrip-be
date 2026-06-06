@@ -9,9 +9,13 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Optional;
+
 public interface NotificationRepository extends JpaRepository<Notification, Long> {
 
     Page<Notification> findByRecipientIdOrderByCreatedAtDesc(Long userId, Pageable pageable);
+
+    Optional<Notification> findByIdAndRecipientId(Long id, Long recipientId);
 
     long countByRecipientIdAndIsReadFalse(Long userId);
 

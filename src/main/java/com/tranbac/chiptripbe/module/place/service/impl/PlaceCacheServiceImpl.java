@@ -6,6 +6,7 @@ import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
 import com.tranbac.chiptripbe.module.place.service.PlaceCacheService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
@@ -25,8 +26,13 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
                 .filter(this::isFresh);
     }
 
+    /**
+     * Lưu cache trong transaction RIÊNG: nếu DB-level unique index trên goong_place_id
+     * reject duplicate (race condition giữa 2 request), exception chỉ rollback tx này —
+     * tx ngoài (vd trip generation) vẫn an toàn.
+     */
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public PlaceCache save(PlaceCache place) {
         return repository.save(place);
     }

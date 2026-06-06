@@ -9,6 +9,7 @@ import com.tranbac.chiptripbe.module.place.service.PlaceCacheService;
 import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -66,7 +67,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         // 3. Dedup theo goongPlaceId — nếu đã có row khác với cùng placeId thì tái dùng
         //    (chỉ tiết kiệm SerpApi khi row đã enrich đủ; nếu chưa, vẫn cần retry SerpApi)
         if (geo.placeId() != null && !geo.placeId().isBlank()) {
-            Optional<PlaceCache> byPlaceId = placeCacheRepository.findByGoongPlaceId(geo.placeId());
+            Optional<PlaceCache> byPlaceId = placeCacheRepository.findBestByGoongPlaceId(geo.placeId());
             if (byPlaceId.isPresent() && byPlaceId.get().isSerpEnriched()) {
                 log.debug("Place cache dedup by goongPlaceId='{}', reuse id={}", geo.placeId(), byPlaceId.get().getId());
                 return byPlaceId;
@@ -77,7 +78,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         Optional<PlaceCache> existing = placeCacheRepository.findByNormalizedName(normalized);
         // Hoặc lấy row theo goongPlaceId (trường hợp tên AI sinh khác nhau cho cùng địa điểm)
         if (existing.isEmpty() && geo.placeId() != null && !geo.placeId().isBlank()) {
-            existing = placeCacheRepository.findByGoongPlaceId(geo.placeId());
+            existing = placeCacheRepository.findBestByGoongPlaceId(geo.placeId());
         }
 
         PlaceCache.PlaceCacheBuilder builder = existing
@@ -95,9 +96,18 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         builder.serpEnriched(outcome.enriched());
         builder.serpSyncedAt(outcome.syncedAt());
 
-        PlaceCache saved = placeCacheRepository.save(builder.build());
-        log.debug("Saved place cache id={} normalized='{}' serpEnriched={}", saved.getId(), normalized, outcome.enriched());
-        return Optional.of(saved);
+        PlaceCache toSave = builder.build();
+        try {
+            // Lưu trong REQUIRES_NEW (xem PlaceCacheServiceImpl.save) — race condition trên
+            // unique index goong_place_id chỉ rollback tx con, tx ngoài vẫn an toàn.
+            PlaceCache saved = placeCacheService.save(toSave);
+            log.debug("Saved place cache id={} normalized='{}' serpEnriched={}", saved.getId(), normalized, outcome.enriched());
+            return Optional.of(saved);
+        } catch (DataIntegrityViolationException ex) {
+            String placeId = toSave.getGoongPlaceId();
+            log.warn("Duplicate goong_place_id='{}' on insert (concurrent writer); refetching best existing row", placeId);
+            return placeCacheRepository.findBestByGoongPlaceId(placeId);
+        }
     }
 
     /** Kết quả của 1 lần attempt SerpApi. */
