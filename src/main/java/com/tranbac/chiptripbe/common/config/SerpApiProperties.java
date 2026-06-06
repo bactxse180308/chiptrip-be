@@ -17,4 +17,6 @@ public class SerpApiProperties {
     private boolean enabled = true;
     /** Số ngày trước khi cache bị coi là hết hạn */
     private int cacheTtlDays = 7;
+    /** Số phút backoff giữa các lần retry SerpApi khi row chưa enrich đủ — chống thundering herd khi SerpApi down */
+    private int retryBackoffMinutes = 60;
 }

@@ -7,4 +7,6 @@ import java.util.Optional;
 
 public interface PlaceCacheRepository extends JpaRepository<PlaceCache, Long> {
     Optional<PlaceCache> findByNormalizedName(String normalizedName);
+
+    Optional<PlaceCache> findByGoongPlaceId(String goongPlaceId);
 }

@@ -10,7 +10,10 @@ import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "place_cache",
-    indexes = @Index(name = "ix_place_cache_normalized_name", columnList = "normalized_name"))
+    indexes = {
+        @Index(name = "ix_place_cache_normalized_name", columnList = "normalized_name"),
+        @Index(name = "ix_place_cache_goong_place_id", columnList = "goong_place_id")
+    })
 @Getter
 @Setter
 @Builder(toBuilder = true)
@@ -71,7 +74,16 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "website", length = 500)
     private String website;
 
-    /** Thời điểm lần cuối đồng bộ với API ngoài */
+    /** Thời điểm lần cuối đồng bộ Goong (geocode) thành công */
     @Column(name = "last_synced_at", columnDefinition = "DATETIME2")
     private LocalDateTime lastSyncedAt;
+
+    /** Thời điểm lần cuối ATTEMPT gọi SerpApi (thành công hoặc không có data). Null = chưa từng thử. */
+    @Column(name = "serp_synced_at", columnDefinition = "DATETIME2")
+    private LocalDateTime serpSyncedAt;
+
+    /** True khi SerpApi đã trả về data hữu ích (có rating HOẶC có ảnh). False = cần retry theo backoff. */
+    @Column(name = "serp_enriched", columnDefinition = "bit NOT NULL DEFAULT 0")
+    @Builder.Default
+    private boolean serpEnriched = false;
 }

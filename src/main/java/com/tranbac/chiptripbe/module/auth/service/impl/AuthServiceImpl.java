@@ -108,6 +108,10 @@ class AuthServiceImpl implements AuthService {
             throw AppException.unauthorized("Email hoặc mật khẩu không đúng");
         }
 
+        if (!user.getEmailVerified()) {
+            throw AppException.emailNotVerified();
+        }
+
         if (!user.getIsActive()) {
             throw AppException.forbidden("Tài khoản đã bị vô hiệu hóa");
         }
