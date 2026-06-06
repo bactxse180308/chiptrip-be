@@ -44,4 +44,9 @@ public class AppException extends RuntimeException {
     public static AppException internal(String message) {
         return new AppException(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", message, null);
     }
+
+    public static AppException emailNotVerified() {
+        return new AppException(HttpStatus.FORBIDDEN, "EMAIL_NOT_VERIFIED",
+                "Email chưa được xác nhận. Vui lòng kiểm tra hộp thư và nhập mã OTP.", null);
+    }
 }

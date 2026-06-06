@@ -2,6 +2,7 @@ package com.tranbac.chiptripbe.module.trip.service.impl;
 
 import com.tranbac.chiptripbe.common.enums.TripMemberRole;
 import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.module.notification.event.TripMemberAddedEvent;
 import com.tranbac.chiptripbe.module.trip.dto.request.AddMemberRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateMemberRequest;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripMemberResponse;
@@ -13,6 +14,7 @@ import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,6 +29,7 @@ class TripMemberServiceImpl implements TripMemberService {
     private final TripMemberRepository tripMemberRepository;
     private final TripRepository tripRepository;
     private final UserRepository userRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Override
     public List<TripMemberResponse> getMembers(Long requesterId, Long tripId) {
@@ -72,7 +75,19 @@ class TripMemberServiceImpl implements TripMemberService {
                 .displayName(displayName)
                 .role(TripMemberRole.MEMBER)
                 .build();
-        return toResponse(tripMemberRepository.save(member));
+        member = tripMemberRepository.save(member);
+
+        // Chỉ thông báo khi member là user thật (có account trong hệ thống).
+        // AFTER_COMMIT listener: nếu transaction này rollback, event không kích hoạt → không có noti.
+        if (linkedUser != null) {
+            eventPublisher.publishEvent(new TripMemberAddedEvent(
+                    linkedUser.getId(),
+                    trip.getId(),
+                    trip.getTitle(),
+                    trip.getUser().getFullName()
+            ));
+        }
+        return toResponse(member);
     }
 
     @Override

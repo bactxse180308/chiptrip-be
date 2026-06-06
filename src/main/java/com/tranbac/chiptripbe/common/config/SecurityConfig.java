@@ -44,12 +44,18 @@ public class SecurityConfig {
             "/api/v1/auth/register",
             "/api/v1/auth/refresh",
             "/api/v1/auth/verify-email",
+            "/api/v1/auth/send-otp",
+            "/api/v1/auth/verify-otp",
             "/api/v1/auth/forgot-password",
             "/api/v1/auth/reset-password",
+            "/api/v1/auth/reset-password-with-otp",
+            "/api/v1/auth/google",
             "/api/v1/trips/shared/**",
             "/swagger-ui/**",
             "/swagger-ui.html",
-            "/api-docs/**"
+            "/api-docs/**",
+            // WebSocket handshake (SockJS) — auth thực hiện ở STOMP CONNECT frame
+            "/ws/**"
     };
 
     @Bean

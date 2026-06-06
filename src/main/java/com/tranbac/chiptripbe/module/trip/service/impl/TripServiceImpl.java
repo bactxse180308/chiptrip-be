@@ -11,6 +11,7 @@ import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.entity.AiUsage;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
+import com.tranbac.chiptripbe.module.notification.event.AiCreditsLowEvent;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
@@ -37,6 +38,7 @@ import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -68,6 +70,7 @@ class TripServiceImpl implements TripService {
     private final ObjectMapper objectMapper;
     private final PlaceEnrichmentService placeEnrichmentService;
     private final PlaceCacheRepository placeCacheRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Override
     @Transactional
@@ -235,8 +238,15 @@ class TripServiceImpl implements TripService {
         }
 
         // Trừ AI credits sau khi persist thành công
-        user.setAiCredits(user.getAiCredits() - 1);
+        int remainingCredits = user.getAiCredits() - 1;
+        user.setAiCredits(remainingCredits);
         userRepository.save(user);
+
+        // Cảnh báo khi credits thấp (sau khi trừ còn 0 hoặc 1) — publish event để
+        // listener AFTER_COMMIT chỉ tạo noti khi toàn bộ transaction này thành công.
+        if (remainingCredits <= 1) {
+            eventPublisher.publishEvent(new AiCreditsLowEvent(userId, remainingCredits));
+        }
 
         // Log AI usage
         BigDecimal costUsd = BigDecimal.valueOf(

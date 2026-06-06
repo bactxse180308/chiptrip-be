@@ -46,14 +46,14 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         String cleanedName = cleanPlaceName(placeName);
         String normalized = normalize(cleanedName);
 
-        // 1. Kiểm tra cache còn mới
+        // 1. Kiểm tra cache còn fresh theo normalizedName
         Optional<PlaceCache> fresh = placeCacheService.findFreshCache(normalized);
         if (fresh.isPresent()) {
             log.debug("Place cache hit: '{}'", normalized);
             return fresh;
         }
 
-        // 2. Goong geocode — đây là bước bắt buộc
+        // 2. Goong geocode — bắt buộc để có lat/lng
         String geocodeQuery = buildGeocodeQuery(cleanedName, destination);
         Optional<GoongClient.GeocodeResult> geoOpt = goongClient.forwardGeocode(geocodeQuery);
         if (geoOpt.isEmpty()) {
@@ -63,11 +63,26 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
 
         GoongClient.GeocodeResult geo = geoOpt.get();
 
-        // 3. Lấy row cũ nếu có (để update thay vì insert mới)
+        // 3. Dedup theo goongPlaceId — nếu đã có row khác với cùng placeId thì tái dùng
+        //    (chỉ tiết kiệm SerpApi khi row đã enrich đủ; nếu chưa, vẫn cần retry SerpApi)
+        if (geo.placeId() != null && !geo.placeId().isBlank()) {
+            Optional<PlaceCache> byPlaceId = placeCacheRepository.findByGoongPlaceId(geo.placeId());
+            if (byPlaceId.isPresent() && byPlaceId.get().isSerpEnriched()) {
+                log.debug("Place cache dedup by goongPlaceId='{}', reuse id={}", geo.placeId(), byPlaceId.get().getId());
+                return byPlaceId;
+            }
+        }
+
+        // 4. Lấy row cũ theo normalizedName nếu có (để update thay vì insert mới)
         Optional<PlaceCache> existing = placeCacheRepository.findByNormalizedName(normalized);
+        // Hoặc lấy row theo goongPlaceId (trường hợp tên AI sinh khác nhau cho cùng địa điểm)
+        if (existing.isEmpty() && geo.placeId() != null && !geo.placeId().isBlank()) {
+            existing = placeCacheRepository.findByGoongPlaceId(geo.placeId());
+        }
+
         PlaceCache.PlaceCacheBuilder builder = existing
                 .map(PlaceCache::toBuilder)
-                .orElse(PlaceCache.builder().normalizedName(normalized).name(cleanedName));
+                .orElseGet(() -> PlaceCache.builder().normalizedName(normalized).name(cleanedName));
 
         builder.latitude(geo.lat())
                 .longitude(geo.lng())
@@ -75,71 +90,109 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 .address(geo.formattedAddress())
                 .lastSyncedAt(LocalDateTime.now());
 
-        // 4. SerpApi enrich (best-effort: nếu fail vẫn lưu dữ liệu Goong)
+        // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu dữ liệu Goong)
+        SerpEnrichOutcome outcome = enrichWithSerpApi(builder, cleanedName, destination, placeName);
+        builder.serpEnriched(outcome.enriched());
+        builder.serpSyncedAt(outcome.syncedAt());
+
+        PlaceCache saved = placeCacheRepository.save(builder.build());
+        log.debug("Saved place cache id={} normalized='{}' serpEnriched={}", saved.getId(), normalized, outcome.enriched());
+        return Optional.of(saved);
+    }
+
+    /** Kết quả của 1 lần attempt SerpApi. */
+    private record SerpEnrichOutcome(boolean enriched, LocalDateTime syncedAt) {}
+
+    /**
+     * Gọi SerpApi và set các field enrich lên builder.
+     * - enriched=true khi có rating HOẶC photos không rỗng → cache OK trong TTL
+     * - enriched=false + syncedAt=now() khi attempt được nhưng không có data → áp dụng backoff
+     * - enriched=false + syncedAt=null khi exception (chưa thật sự attempt được) → retry ngay lần sau
+     */
+    private SerpEnrichOutcome enrichWithSerpApi(PlaceCache.PlaceCacheBuilder builder,
+                                                String cleanedName,
+                                                String destination,
+                                                String originalName) {
         try {
             String serpQuery = cleanedName + (destination != null ? " " + destination : "") + " Việt Nam";
             Optional<SerpApiClient.PlaceData> serpOpt = serpApiClient.searchPlace(serpQuery);
-            serpOpt.ifPresent(s -> {
-                builder.serpDataId(s.dataId())
-                        .rating(s.rating())
-                        .reviewCount(s.reviewCount())
-                        .openingHoursJson(s.openingHoursJson())
-                        .openState(s.openNow() != null ? (s.openNow() ? "OPEN" : "CLOSED") : null)
-                        .phone(s.phone())
-                        .website(s.website());
-                // Lấy nhiều ảnh từ SerpApi
-                List<Map<String, String>> photos = List.of();
-                if (s.dataId() != null && !s.dataId().isBlank()) {
-                    try {
-                        photos = serpApiClient.fetchPhotos(s.dataId());
-                    } catch (Exception ex) {
-                        log.warn("SerpApi fetchPhotos failed for dataId='{}': {}", s.dataId(), ex.getMessage());
+            if (serpOpt.isEmpty()) {
+                log.debug("SerpApi không trả về data cho '{}', áp dụng backoff", serpQuery);
+                return new SerpEnrichOutcome(false, LocalDateTime.now());
+            }
+
+            SerpApiClient.PlaceData s = serpOpt.get();
+            builder.serpDataId(s.dataId())
+                    .rating(s.rating())
+                    .reviewCount(s.reviewCount())
+                    .openingHoursJson(s.openingHoursJson())
+                    .openState(s.openNow() != null ? (s.openNow() ? "OPEN" : "CLOSED") : null)
+                    .phone(s.phone())
+                    .website(s.website());
+
+            List<Map<String, String>> photos = List.of();
+            if (s.dataId() != null && !s.dataId().isBlank()) {
+                photos = safeFetchPhotos(s.dataId());
+            }
+
+            if (photos != null && !photos.isEmpty()) {
+                try {
+                    builder.photosJson(objectMapper.writeValueAsString(photos));
+                } catch (Exception ex) {
+                    log.warn("Failed to serialize photos list to JSON: {}", ex.getMessage());
+                    if (s.thumbnailUrl() != null) {
+                        builder.photosJson(buildPhotosJson(s.thumbnailUrl()));
                     }
                 }
+            } else if (s.thumbnailUrl() != null) {
+                builder.photosJson(buildPhotosJson(s.thumbnailUrl()));
+            }
 
-                if (photos != null && !photos.isEmpty()) {
-                    try {
-                        builder.photosJson(objectMapper.writeValueAsString(photos));
-                    } catch (Exception ex) {
-                        log.warn("Failed to serialize photos list to JSON: {}", ex.getMessage());
-                        if (s.thumbnailUrl() != null) {
-                            builder.photosJson(buildPhotosJson(s.thumbnailUrl()));
-                        }
-                    }
-                } else if (s.thumbnailUrl() != null) {
-                    builder.photosJson(buildPhotosJson(s.thumbnailUrl()));
+            List<Map<String, Object>> reviews = List.of();
+            if (s.dataId() != null && !s.dataId().isBlank()) {
+                reviews = safeFetchReviews(s.dataId());
+            }
+            if (reviews != null && !reviews.isEmpty()) {
+                try {
+                    builder.reviewsJson(objectMapper.writeValueAsString(reviews));
+                } catch (Exception ex) {
+                    log.warn("Failed to serialize reviews list to JSON: {}", ex.getMessage());
                 }
+            }
 
-                // Lấy các bài đánh giá thật từ SerpApi
-                List<Map<String, Object>> reviews = List.of();
-                if (s.dataId() != null && !s.dataId().isBlank()) {
-                    try {
-                        reviews = serpApiClient.fetchReviews(s.dataId());
-                    } catch (Exception ex) {
-                        log.warn("SerpApi fetchReviews failed for dataId='{}': {}", s.dataId(), ex.getMessage());
-                    }
-                }
+            boolean hasPhotos = (photos != null && !photos.isEmpty()) || s.thumbnailUrl() != null;
+            boolean enriched = s.rating() != null || hasPhotos;
 
-                if (reviews != null && !reviews.isEmpty()) {
-                    try {
-                        builder.reviewsJson(objectMapper.writeValueAsString(reviews));
-                    } catch (Exception ex) {
-                        log.warn("Failed to serialize reviews list to JSON: {}", ex.getMessage());
-                    }
-                }
+            log.info("SerpApi enrich result: name='{}', rating={}, reviewCount={}, dataId={}, photosCount={}, reviewsCount={}, enriched={}",
+                    cleanedName, s.rating(), s.reviewCount(), s.dataId(),
+                    photos != null ? photos.size() : 0,
+                    reviews != null ? reviews.size() : 0,
+                    enriched);
 
-                log.info("SerpApi successfully enriched place: name='{}', rating={}, reviewCount={}, dataId={}, photosCount={}, reviewsCount={}",
-                        cleanedName, s.rating(), s.reviewCount(), s.dataId(),
-                        photos != null ? photos.size() : 0,
-                        reviews != null ? reviews.size() : 0);
-            });
+            return new SerpEnrichOutcome(enriched, LocalDateTime.now());
+
         } catch (Exception e) {
-            log.warn("SerpApi enrich failed for '{}', dùng Goong-only data: {}", placeName, e.getMessage());
+            log.warn("SerpApi enrich failed for '{}', dùng Goong-only data: {}", originalName, e.getMessage());
+            return new SerpEnrichOutcome(false, null);
         }
+    }
 
-        PlaceCache saved = placeCacheRepository.save(builder.build());
-        log.debug("Saved place cache id={} normalized='{}'", saved.getId(), normalized);
-        return Optional.of(saved);
+    private List<Map<String, String>> safeFetchPhotos(String dataId) {
+        try {
+            return serpApiClient.fetchPhotos(dataId);
+        } catch (Exception ex) {
+            log.warn("SerpApi fetchPhotos failed for dataId='{}': {}", dataId, ex.getMessage());
+            return List.of();
+        }
+    }
+
+    private List<Map<String, Object>> safeFetchReviews(String dataId) {
+        try {
+            return serpApiClient.fetchReviews(dataId);
+        } catch (Exception ex) {
+            log.warn("SerpApi fetchReviews failed for dataId='{}': {}", dataId, ex.getMessage());
+            return List.of();
+        }
     }
 
     // ─── Private helpers ────────────────────────────────────────────────────

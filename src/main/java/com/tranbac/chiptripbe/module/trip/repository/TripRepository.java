@@ -20,6 +20,11 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
 
     Optional<Trip> findByIdAndUserId(Long id, Long userId);
 
+    List<Trip> findByDateStart(java.time.LocalDate dateStart);
+
+    /** Lấy các trip có dateStart trong [from, to] (inclusive) cho weather-alert scheduler. */
+    List<Trip> findByDateStartBetween(java.time.LocalDate from, java.time.LocalDate to);
+
     @Query("SELECT YEAR(t.createdAt), MONTH(t.createdAt), DAY(t.createdAt), COUNT(t) " +
            "FROM Trip t WHERE t.createdAt >= :from AND t.createdAt <= :to " +
            "GROUP BY YEAR(t.createdAt), MONTH(t.createdAt), DAY(t.createdAt) " +

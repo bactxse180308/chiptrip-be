@@ -18,6 +18,8 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
 
     Optional<User> findByOauthProviderAndOauthProviderId(com.tranbac.chiptripbe.common.enums.OAuthProvider provider, String oauthProviderId);
 
+    List<User> findAllByRole_NameAndIsActiveTrue(String roleName);
+
     @Query("SELECT YEAR(u.createdAt), MONTH(u.createdAt), DAY(u.createdAt), COUNT(u) " +
            "FROM User u WHERE u.createdAt >= :from AND u.createdAt <= :to " +
            "GROUP BY YEAR(u.createdAt), MONTH(u.createdAt), DAY(u.createdAt) " +

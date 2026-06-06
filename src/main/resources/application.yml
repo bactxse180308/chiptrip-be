@@ -34,6 +34,11 @@ spring:
     show-sql: false
     open-in-view: false
 
+  servlet:
+    multipart:
+      max-file-size: 6MB
+      max-request-size: 8MB
+
 app:
   jwt:
     secret: ${JWT_SECRET}
@@ -73,8 +78,17 @@ app:
     timeout-seconds: 10
     enabled: true
     cache-ttl-days: 30
+    retry-backoff-minutes: 360
   external:
     openweather-api-key: ${OPENWEATHER_API_KEY:}
+  r2:
+    endpoint: ${R2_ENDPOINT:}
+    access-key: ${R2_ACCESS_KEY:}
+    secret-key: ${R2_SECRET_KEY:}
+    bucket-name: ${R2_BUCKET_NAME:}
+    public-url: ${R2_PUBLIC_URL:}
+  chat:
+    image-max-bytes: 5242880
   rate-limit:
     login-limit: 5
     login-window-minutes: 15
