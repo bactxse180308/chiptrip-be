@@ -95,28 +95,29 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             existing = placeCacheRepository.findBestByGoongPlaceId(geo.placeId());
         }
 
-        PlaceCache.PlaceCacheBuilder builder = existing
-                .map(PlaceCache::toBuilder)
-                .orElseGet(() -> PlaceCache.builder()
-                        .normalizedName(normalized)
-                        .normalizedDestination(normalizedDestination)
-                        .name(cleanedName));
+        PlaceCache toSave;
+        if (existing.isPresent()) {
+            toSave = existing.get();
+        } else {
+            toSave = new PlaceCache();
+            toSave.setNormalizedName(normalized);
+            toSave.setNormalizedDestination(normalizedDestination);
+            toSave.setName(cleanedName);
+        }
 
         // Đảm bảo các field key luôn có
-        builder.normalizedName(normalized)
-                .normalizedDestination(normalizedDestination)
-                .latitude(geo.lat())
-                .longitude(geo.lng())
-                .goongPlaceId(geo.placeId())
-                .address(geo.formattedAddress())
-                .lastSyncedAt(LocalDateTime.now());
+        toSave.setNormalizedName(normalized);
+        toSave.setNormalizedDestination(normalizedDestination);
+        toSave.setLatitude(geo.lat());
+        toSave.setLongitude(geo.lng());
+        toSave.setGoongPlaceId(geo.placeId());
+        toSave.setAddress(geo.formattedAddress());
+        toSave.setLastSyncedAt(LocalDateTime.now());
 
         // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu data Goong)
-        SerpEnrichOutcome outcome = enrichWithSerpApi(builder, cleanedName, destination, normalizedDestination, geo, placeName);
-        builder.serpEnriched(outcome.enriched());
-        builder.serpSyncedAt(outcome.syncedAt());
-
-        PlaceCache toSave = builder.build();
+        SerpEnrichOutcome outcome = enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination, geo, placeName);
+        toSave.setSerpEnriched(outcome.enriched());
+        toSave.setSerpSyncedAt(outcome.syncedAt());
         try {
             PlaceCache saved = placeCacheService.save(toSave);
             log.debug("Saved place cache id={} normalized='{}' dest='{}' serpEnriched={}",
@@ -133,10 +134,10 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     private record SerpEnrichOutcome(boolean enriched, LocalDateTime syncedAt) {}
 
     /**
-     * Gọi SerpApi, chọn candidate khớp nhất, set field enrich lên builder.
+     * Gọi SerpApi, chọn candidate khớp nhất, set field enrich lên entity.
      * Tiêu chí "enriched" mới: hasBasic && hasPhotos && (hasOpeningHours || hasReviews).
      */
-    private SerpEnrichOutcome enrichWithSerpApi(PlaceCache.PlaceCacheBuilder builder,
+    private SerpEnrichOutcome enrichWithSerpApi(PlaceCache entity,
                                                 String cleanedName,
                                                 String destination,
                                                 String normalizedDestination,
@@ -157,17 +158,23 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 return new SerpEnrichOutcome(false, LocalDateTime.now());
             }
 
-            builder.serpDataId(s.dataId())
-                    .serpPlaceId(s.placeId())
-                    .serpTitle(s.title())
-                    .placeType(s.type())
-                    .rating(s.rating())
-                    .reviewCount(s.reviewCount())
-                    .openingHoursJson(s.operatingHoursJson())
-                    .openState(resolveOpenState(s))
-                    .hoursText(s.hours())
-                    .phone(s.phone())
-                    .website(s.website());
+            entity.setSerpDataId(s.dataId());
+            entity.setSerpPlaceId(s.placeId());
+            entity.setSerpTitle(s.title());
+            entity.setPlaceType(s.type());
+            entity.setRating(s.rating());
+            entity.setReviewCount(s.reviewCount());
+            entity.setOpeningHoursJson(s.operatingHoursJson());
+            entity.setOpenState(resolveOpenState(s));
+            // hoursText: prefer s.hours() (chuỗi ngắn), fallback raw openState text (truncate tại 255)
+            String hoursText = s.hours();
+            if (hoursText == null && s.openState() != null && !s.openState().isBlank()) {
+                String raw = s.openState();
+                hoursText = raw.length() > 255 ? raw.substring(0, 255) : raw;
+            }
+            entity.setHoursText(hoursText);
+            entity.setPhone(s.phone());
+            entity.setWebsite(s.website());
 
             String photosId = s.dataId() != null ? s.dataId() : s.placeId();
             List<Map<String, String>> photos = List.of();
@@ -178,7 +185,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             boolean photosWritten = false;
             if (photos != null && !photos.isEmpty()) {
                 try {
-                    builder.photosJson(objectMapper.writeValueAsString(photos));
+                    entity.setPhotosJson(objectMapper.writeValueAsString(photos));
                     photosWritten = true;
                 } catch (Exception ex) {
                     log.warn("Failed to serialize photos list to JSON: {}", ex.getMessage());
@@ -187,7 +194,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             if (!photosWritten && s.thumbnailUrl() != null) {
                 String fallback = buildPhotosJson(s.thumbnailUrl());
                 if (fallback != null) {
-                    builder.photosJson(fallback);
+                    entity.setPhotosJson(fallback);
                 }
             }
 
@@ -198,7 +205,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             }
             if (reviews != null && !reviews.isEmpty()) {
                 try {
-                    builder.reviewsJson(objectMapper.writeValueAsString(reviews));
+                    entity.setReviewsJson(objectMapper.writeValueAsString(reviews));
                 } catch (Exception ex) {
                     log.warn("Failed to serialize reviews list to JSON: {}", ex.getMessage());
                 }
@@ -323,7 +330,12 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     }
 
     private String resolveOpenState(SerpApiClient.PlaceData s) {
-        if (s.openState() != null && !s.openState().isBlank()) return s.openState();
+        if (s.openState() != null && !s.openState().isBlank()) {
+            String lower = s.openState().toLowerCase();
+            if (lower.contains("đang mở") || lower.contains("open")) return "OPEN";
+            if (lower.contains("đã đóng") || lower.contains("closed")) return "CLOSED";
+            // text dài/không rõ → trả null; raw text sẽ vào hoursText
+        }
         if (s.openNow() != null) return s.openNow() ? "OPEN" : "CLOSED";
         return null;
     }

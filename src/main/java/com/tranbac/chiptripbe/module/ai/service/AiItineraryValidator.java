@@ -40,7 +40,12 @@ public class AiItineraryValidator {
             "quan cafe dep",
             "diem an uong",
             "diem tham quan",
-            "diem du lich"
+            "diem du lich",
+            // Accommodation generic — AI phải sinh tên khách sạn/homestay cụ thể
+            "khach san trung tam",
+            "khach san gan trung tam",
+            "homestay gan cho",
+            "nha nghi gia re"
     );
 
     public void validate(AiItineraryResult result, GenerateTripRequest request) {
@@ -159,6 +164,8 @@ public class AiItineraryValidator {
         String normalized = normalize(q);
         for (String generic : GENERIC_SEARCH_QUERIES) {
             if (normalized.equals(generic)) return true;
+            // Bắt "Khách sạn trung tâm Đà Lạt" → startsWith "khach san trung tam "
+            if (normalized.startsWith(generic + " ")) return true;
         }
         return false;
     }

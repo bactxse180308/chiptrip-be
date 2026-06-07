@@ -85,6 +85,12 @@ class AiGenerateServiceImpl implements AiService {
                   searchQuery phải gồm tên địa điểm cụ thể + tên tỉnh/thành phố.
                   Ví dụ đúng: "Bánh căn Nhà Chung Đà Lạt", "Hồ Xuân Hương Đà Lạt", "Sân bay Nội Bài Hà Nội".
                   Ví dụ sai: "Nhà hàng địa phương", "Khu vui chơi" (quá chung, không tìm được).
+                - TRANSPORT searchQuery phải thuộc đúng thành phố nơi phương tiện xuất phát/đến, KHÔNG gộp 2 tỉnh/thành vào cùng 1 query:
+                  Ví dụ đúng: "Sân bay Quốc tế Đà Nẵng Đà Nẵng" (xuất phát Đà Nẵng), "Sân bay Liên Khương Đà Lạt" (đến Đà Lạt).
+                  Ví dụ sai: "Sân bay Quốc tế Đà Nẵng Đà Lạt" (sai — gộp tên 2 tỉnh thành 1 query).
+                - ACCOMMODATION searchQuery phải là tên khách sạn/homestay CỤ THỂ + tên tỉnh/thành phố, không sinh query chung:
+                  Ví dụ đúng: "Ana Mandara Villas Đà Lạt", "Homestay Hoa Lan Đà Lạt".
+                  Ví dụ sai: "Khách sạn trung tâm", "Homestay gần chợ" (quá chung, không geocode được).
                 - Phân bổ chi phí hợp lý, tổng không vượt ngân sách.
                 - type phải là một trong: FOOD, ATTRACTION, TRANSPORT, ACCOMMODATION, OTHER.
                 - category trong checklist phải là một trong: PAPERS, CLOTHES, HYGIENE, OTHER.
