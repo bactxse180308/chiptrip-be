@@ -1,5 +1,7 @@
 package com.tranbac.chiptripbe.module.external.service;
 
+import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.module.external.dto.response.PlaceLookupResponse;
 import com.tranbac.chiptripbe.module.external.dto.response.PlaceSearchResponse;
 import com.tranbac.chiptripbe.module.external.dto.response.WeatherResponse;
 import com.tranbac.chiptripbe.module.geocoding.client.GoongClient;
@@ -39,12 +41,30 @@ public class ExternalApiService {
 
         List<PlaceSearchResponse.Place> places = results.stream()
                 .map(r -> PlaceSearchResponse.Place.builder()
+                        .placeId(r.placeId())
                         .description(r.description())
                         .mainText(r.mainText())
                         .secondaryText(r.secondaryText())
                         .build())
                 .toList();
         return PlaceSearchResponse.builder().predictions(places).build();
+    }
+
+    /**
+     * Tra cứu lat/lng + admin info từ Goong placeId (sau khi user chọn 1 autocomplete prediction).
+     * Throw 404 nếu placeId không hợp lệ hoặc Goong không trả về data.
+     */
+    public PlaceLookupResponse lookupPlace(String placeId) {
+        return goongClient.placeDetail(placeId)
+                .map(g -> PlaceLookupResponse.builder()
+                        .placeId(g.placeId())
+                        .formattedAddress(g.formattedAddress())
+                        .latitude(g.lat())
+                        .longitude(g.lng())
+                        .provinceName(g.provinceName())
+                        .communeName(g.communeName())
+                        .build())
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy địa điểm với placeId này"));
     }
 
     @SuppressWarnings("unchecked")

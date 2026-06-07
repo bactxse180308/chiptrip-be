@@ -48,6 +48,24 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "goong_place_id", length = 255)
     private String goongPlaceId;
 
+    /** Tên tỉnh/thành từ Goong V2 compound.province (vd "Đà Nẵng", "Hà Nội"). */
+    @Nationalized
+    @Column(name = "province_name", length = 100)
+    private String provinceName;
+
+    /** Tên phường/xã từ Goong V2 compound.commune (vd "Hội An", "Bến Thành"). */
+    @Nationalized
+    @Column(name = "commune_name", length = 100)
+    private String communeName;
+
+    /** Booking link cho khách sạn (lấy từ SerpApi Google Hotels). Null nếu không phải accommodation. */
+    @Column(name = "booking_url", length = 500)
+    private String bookingUrl;
+
+    /** Giá phòng/đêm (VNĐ) lấy từ SerpApi Google Hotels. Null nếu không phải accommodation hoặc fetch fail. */
+    @Column(name = "price_per_night_vnd")
+    private Long pricePerNightVnd;
+
     /** data_id từ SerpApi, dùng để gọi lấy reviews/photos chi tiết hơn sau này */
     @Column(name = "serp_data_id", length = 255)
     private String serpDataId;

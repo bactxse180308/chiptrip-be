@@ -33,6 +33,11 @@ public class PlaceDto {
     private String phone;
     private String website;
 
+    /** Booking link cho khách sạn (SerpApi Google Hotels). Null cho non-accommodation. */
+    private String bookingUrl;
+    /** Giá phòng/đêm VNĐ (SerpApi Google Hotels). Null cho non-accommodation hoặc fetch fail. */
+    private Long pricePerNightVnd;
+
     @Getter
     @Builder
     public static class OpeningHour {

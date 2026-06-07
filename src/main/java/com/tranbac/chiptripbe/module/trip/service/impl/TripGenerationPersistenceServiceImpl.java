@@ -192,6 +192,11 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
             String geocodingProvider = p != null ? "goong" : null;
             Long placeCacheId = p != null ? p.getId() : null;
             String activityImageUrl = p != null ? extractFirstPhotoUrl(p.getPhotosJson()) : null;
+            // Fallback bookingUrl: AI thường không sinh, dùng link từ SerpApi Google Hotels nếu có.
+            String activityBookingUrl = aiActivity.getBookingUrl();
+            if ((activityBookingUrl == null || activityBookingUrl.isBlank()) && p != null) {
+                activityBookingUrl = p.getBookingUrl();
+            }
 
             Activity activity = Activity.builder()
                     .day(day)
@@ -209,7 +214,7 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                     .geocodingProvider(geocodingProvider)
                     .placeCacheId(placeCacheId)
                     .imageUrl(activityImageUrl)
-                    .bookingUrl(aiActivity.getBookingUrl())
+                    .bookingUrl(activityBookingUrl)
                     .build();
             activity = activityRepository.save(activity);
             activityDetails.add(toActivityDetail(activity));

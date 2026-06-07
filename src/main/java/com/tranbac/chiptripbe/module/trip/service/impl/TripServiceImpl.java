@@ -89,7 +89,7 @@ class TripServiceImpl implements TripService {
         aiItineraryValidator.validate(aiCallResult.itinerary(), request);
 
         Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces =
-                resolvePlaces(aiCallResult.itinerary(), request.getDestination());
+                resolvePlaces(aiCallResult.itinerary(), request);
 
         return tripGenerationPersistenceService.persistGeneratedTrip(
                 userId, request, aiCallResult, resolvedPlaces);
@@ -119,20 +119,28 @@ class TripServiceImpl implements TripService {
      * Fail-soft: 1 activity resolve fail không làm fail toàn bộ generate trip.
      * Trip vẫn được tạo, activity chỉ thiếu location/enrichment.
      */
-    private Map<AiItineraryResult.AiActivity, PlaceCache> resolvePlaces(AiItineraryResult itinerary, String destination) {
+    private Map<AiItineraryResult.AiActivity, PlaceCache> resolvePlaces(
+            AiItineraryResult itinerary, GenerateTripRequest request) {
         Map<AiItineraryResult.AiActivity, PlaceCache> resolved = new IdentityHashMap<>();
         if (itinerary.getDays() == null) return resolved;
 
+        String destination = request.getDestination();
         for (AiItineraryResult.AiDay day : itinerary.getDays()) {
             if (day.getActivities() == null) continue;
+            LocalDate dayDate = parseDayDate(day, request);
             for (AiItineraryResult.AiActivity act : day.getActivities()) {
                 ActivityType type = parseActivityType(act.getType());
                 if (!shouldGeocode(type)) continue;
                 if (act.getSearchQuery() == null || act.getSearchQuery().isBlank()) continue;
 
                 try {
-                    placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination)
-                            .ifPresent(place -> resolved.put(act, place));
+                    Optional<PlaceCache> placeOpt = placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination);
+                    placeOpt.ifPresent(place -> {
+                        resolved.put(act, place);
+                        if (type == ActivityType.ACCOMMODATION && dayDate != null) {
+                            placeEnrichmentService.enrichAccommodation(place, dayDate, dayDate.plusDays(1));
+                        }
+                    });
                 } catch (Exception e) {
                     log.warn("Resolve place failed (skip): activity='{}', searchQuery='{}', error={}",
                             act.getName(), act.getSearchQuery(), e.getMessage());
@@ -140,6 +148,17 @@ class TripServiceImpl implements TripService {
             }
         }
         return resolved;
+    }
+
+    /** Lấy date của day: ưu tiên field AI sinh, fallback request.startDate + dayNumber. */
+    private LocalDate parseDayDate(AiItineraryResult.AiDay day, GenerateTripRequest request) {
+        if (day.getDate() != null && !day.getDate().isBlank()) {
+            try { return LocalDate.parse(day.getDate()); } catch (Exception ignored) {}
+        }
+        if (day.getDayNumber() != null && request.getStartDate() != null) {
+            return request.getStartDate().plusDays(day.getDayNumber() - 1);
+        }
+        return null;
     }
 
     @Override

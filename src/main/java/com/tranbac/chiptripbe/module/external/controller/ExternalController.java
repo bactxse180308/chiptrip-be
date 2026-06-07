@@ -1,6 +1,7 @@
 package com.tranbac.chiptripbe.module.external.controller;
 
 import com.tranbac.chiptripbe.common.response.ApiResponse;
+import com.tranbac.chiptripbe.module.external.dto.response.PlaceLookupResponse;
 import com.tranbac.chiptripbe.module.external.dto.response.PlaceSearchResponse;
 import com.tranbac.chiptripbe.module.external.dto.response.WeatherResponse;
 import com.tranbac.chiptripbe.module.external.service.ExternalApiService;
@@ -22,11 +23,18 @@ public class ExternalController {
 
     private final ExternalApiService externalApiService;
 
-    @Operation(summary = "Autocomplete tên thành phố (Google Maps Places)")
+    @Operation(summary = "Autocomplete tên địa điểm (Goong Place AutoComplete)")
     @SecurityRequirement(name = "bearerAuth")
     @GetMapping("/places/search")
     public ResponseEntity<ApiResponse<PlaceSearchResponse>> searchPlaces(@RequestParam String q) {
         return ResponseEntity.ok(ApiResponse.ok(externalApiService.searchPlaces(q)));
+    }
+
+    @Operation(summary = "Tra cứu chi tiết địa điểm (lat/lng + tỉnh/phường) từ Goong placeId")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/places/detail")
+    public ResponseEntity<ApiResponse<PlaceLookupResponse>> lookupPlace(@RequestParam String placeId) {
+        return ResponseEntity.ok(ApiResponse.ok(externalApiService.lookupPlace(placeId)));
     }
 
     @Operation(summary = "Dự báo thời tiết ngày trong chuyến đi (OpenWeather)")

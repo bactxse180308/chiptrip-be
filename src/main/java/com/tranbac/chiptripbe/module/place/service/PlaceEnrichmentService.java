@@ -2,6 +2,7 @@ package com.tranbac.chiptripbe.module.place.service;
 
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 
+import java.time.LocalDate;
 import java.util.Optional;
 
 public interface PlaceEnrichmentService {
@@ -17,4 +18,12 @@ public interface PlaceEnrichmentService {
      * Trả Optional.empty() nếu Goong không geocode được địa điểm.
      */
     Optional<PlaceCache> resolvePlace(String placeName, String destination);
+
+    /**
+     * Enrich thêm thông tin khách sạn (bookingUrl + pricePerNightVnd) từ SerpApi Google Hotels,
+     * lưu trực tiếp vào PlaceCache hiện có. Best-effort: fail-soft, không vỡ luồng generate.
+     *
+     * Chỉ gọi khi activity type=ACCOMMODATION.
+     */
+    void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut);
 }

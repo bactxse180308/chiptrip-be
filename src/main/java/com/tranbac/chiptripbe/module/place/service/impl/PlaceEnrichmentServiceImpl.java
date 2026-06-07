@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -112,6 +113,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         toSave.setLongitude(geo.lng());
         toSave.setGoongPlaceId(geo.placeId());
         toSave.setAddress(geo.formattedAddress());
+        toSave.setProvinceName(geo.provinceName());
+        toSave.setCommuneName(geo.communeName());
         toSave.setLastSyncedAt(LocalDateTime.now());
 
         // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu data Goong)
@@ -127,6 +130,40 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             String placeId = toSave.getGoongPlaceId();
             log.warn("Duplicate goong_place_id='{}' on insert (concurrent writer); refetching best existing row", placeId);
             return placeCacheRepository.findBestByGoongPlaceId(placeId);
+        }
+    }
+
+    /**
+     * Enrich hotel-specific data (booking link + price/night) khi activity là ACCOMMODATION.
+     * Best-effort: fail-soft (SerpApi Hotels không hoạt động → place_cache giữ nguyên).
+     */
+    @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut) {
+        if (cache == null) return;
+        try {
+            Optional<SerpApiClient.HotelData> hotelOpt = serpApiClient.searchHotel(cache.getName(), checkIn, checkOut);
+            if (hotelOpt.isEmpty()) return;
+            SerpApiClient.HotelData h = hotelOpt.get();
+
+            boolean changed = false;
+            if (h.bookingLink() != null && !h.bookingLink().isBlank()
+                    && !h.bookingLink().equals(cache.getBookingUrl())) {
+                cache.setBookingUrl(h.bookingLink());
+                changed = true;
+            }
+            if (h.pricePerNightVnd() != null && !h.pricePerNightVnd().equals(cache.getPricePerNightVnd())) {
+                cache.setPricePerNightVnd(h.pricePerNightVnd());
+                changed = true;
+            }
+            if (changed) {
+                placeCacheService.save(cache);
+                log.info("Hotel enrich saved: cache id={} name='{}' price={} VNĐ booking={}",
+                        cache.getId(), cache.getName(), cache.getPricePerNightVnd(), cache.getBookingUrl());
+            }
+        } catch (Exception e) {
+            log.warn("Hotel enrich failed for cache id={} name='{}': {}",
+                    cache.getId(), cache.getName(), e.getMessage());
         }
     }
 

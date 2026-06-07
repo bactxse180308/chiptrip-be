@@ -54,6 +54,8 @@ public class PlaceController {
                 .reviews(parseReviews(p.getReviewsJson()))
                 .phone(p.getPhone())
                 .website(p.getWebsite())
+                .bookingUrl(p.getBookingUrl())
+                .pricePerNightVnd(p.getPricePerNightVnd())
                 .build();
     }
 

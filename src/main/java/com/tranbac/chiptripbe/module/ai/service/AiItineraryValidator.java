@@ -24,6 +24,9 @@ public class AiItineraryValidator {
     /** Cho phép tổng cost vượt budget tối đa 10%. */
     private static final double BUDGET_TOLERANCE = 1.10;
 
+    /** Sàn tolerance tuyệt đối: budget nhỏ vẫn được hở 1 triệu VNĐ thay vì bị 10% siết quá chặt. */
+    private static final long BUDGET_TOLERANCE_FLOOR_VND = 1_000_000L;
+
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm");
 
     private static final Set<String> ALLOWED_TYPES = Set.of(
@@ -145,10 +148,14 @@ public class AiItineraryValidator {
 
     private void validateBudget(long totalCost, GenerateTripRequest request) {
         if (request.getBudgetVnd() == null || request.getBudgetVnd() <= 0) return;
-        long maxAllowed = (long) (request.getBudgetVnd() * BUDGET_TOLERANCE);
+        long budget = request.getBudgetVnd();
+        long percentTolerance = (long) (budget * (BUDGET_TOLERANCE - 1.0));
+        long tolerance = Math.max(percentTolerance, BUDGET_TOLERANCE_FLOOR_VND);
+        long maxAllowed = budget + tolerance;
         if (totalCost > maxAllowed) {
-            throw badAi(String.format("Tổng chi phí AI sinh (%,d VNĐ) vượt ngân sách %,d VNĐ quá 10%%",
-                    totalCost, request.getBudgetVnd()));
+            throw badAi(String.format(
+                    "Tổng chi phí AI sinh (%,d VNĐ) vượt ngân sách %,d VNĐ quá %,d VNĐ cho phép",
+                    totalCost, budget, tolerance));
         }
     }
 

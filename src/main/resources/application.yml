@@ -72,6 +72,7 @@ app:
     api-key: ${GOONG_API_KEY}
     base-url: https://rsapi.goong.io
     timeout-seconds: 5
+    geocode-v2: true
   serpapi:
     api-key: ${SERPAPI_API_KEY:}
     base-url: https://serpapi.com

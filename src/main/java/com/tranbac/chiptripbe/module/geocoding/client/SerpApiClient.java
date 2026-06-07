@@ -11,6 +11,8 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -122,6 +124,92 @@ public class SerpApiClient {
     public Optional<PlaceData> searchPlace(String query) {
         List<PlaceData> candidates = searchPlaceCandidates(query);
         return candidates.isEmpty() ? Optional.empty() : Optional.of(candidates.get(0));
+    }
+
+    /**
+     * Dữ liệu khách sạn từ SerpApi Google Hotels.
+     * pricePerNightVnd: lấy từ rate_per_night.extracted_lowest, đã sẵn VNĐ do currency=VND.
+     */
+    public record HotelData(
+            String name,
+            Long pricePerNightVnd,
+            BigDecimal rating,
+            String thumbnailUrl,
+            String bookingLink
+    ) {}
+
+    private static final DateTimeFormatter HOTEL_DATE_FORMAT = DateTimeFormatter.ISO_LOCAL_DATE;
+
+    /**
+     * Tra cứu khách sạn theo tên + ngày checkin/checkout.
+     * Engine google_hotels, currency=VND, gl=vn, hl=vi.
+     * Trả candidate đầu tiên (best match theo SerpApi). Fail-soft → Optional.empty().
+     */
+    @SuppressWarnings("unchecked")
+    public Optional<HotelData> searchHotel(String name, LocalDate checkIn, LocalDate checkOut) {
+        if (!properties.isEnabled()) return Optional.empty();
+        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return Optional.empty();
+        if (name == null || name.isBlank()) return Optional.empty();
+        if (checkIn == null || checkOut == null || !checkOut.isAfter(checkIn)) return Optional.empty();
+
+        try {
+            log.info("SerpApi searchHotel (engine=google_hotels) name='{}' {}..{}", name, checkIn, checkOut);
+            Map<String, Object> resp = client.get()
+                    .uri(b -> b.path("/search")
+                            .queryParam("engine", "google_hotels")
+                            .queryParam("q", name)
+                            .queryParam("check_in_date", checkIn.format(HOTEL_DATE_FORMAT))
+                            .queryParam("check_out_date", checkOut.format(HOTEL_DATE_FORMAT))
+                            .queryParam("currency", "VND")
+                            .queryParam("gl", "vn")
+                            .queryParam("hl", "vi")
+                            .queryParam("api_key", properties.getApiKey())
+                            .build())
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                    .block();
+
+            if (resp == null) return Optional.empty();
+            List<Map<String, Object>> hotels = (List<Map<String, Object>>) resp.get("properties");
+            if (hotels == null || hotels.isEmpty()) return Optional.empty();
+
+            return parseHotelData(hotels.get(0));
+        } catch (Exception e) {
+            log.warn("SerpApi Google Hotels failed for name='{}': {}", name, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Optional<HotelData> parseHotelData(Map<String, Object> p) {
+        try {
+            String name = stringOrNull(p.get("name"));
+            String link = stringOrNull(p.get("link"));
+            BigDecimal rating = parseBigDecimal(p.get("overall_rating"));
+
+            Long pricePerNight = null;
+            Object rateObj = p.get("rate_per_night");
+            if (rateObj instanceof Map<?, ?> rate) {
+                Object extracted = rate.get("extracted_lowest");
+                if (extracted instanceof Number n) pricePerNight = n.longValue();
+            }
+
+            String thumbnail = null;
+            Object imagesObj = p.get("images");
+            if (imagesObj instanceof List<?> images && !images.isEmpty()
+                    && images.get(0) instanceof Map<?, ?> firstImg) {
+                Object thumb = firstImg.get("thumbnail");
+                if (thumb instanceof String s) thumbnail = s;
+                if (thumbnail == null && firstImg.get("original_image") instanceof String orig) thumbnail = orig;
+            }
+
+            if (name == null && link == null && pricePerNight == null) return Optional.empty();
+            return Optional.of(new HotelData(name, pricePerNight, rating, thumbnail, link));
+        } catch (Exception e) {
+            log.debug("Failed to parse hotel data: {}", e.getMessage());
+            return Optional.empty();
+        }
     }
 
     /**
