@@ -139,10 +139,10 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
      */
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut) {
+    public void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut, Integer adults) {
         if (cache == null) return;
         try {
-            Optional<SerpApiClient.HotelData> hotelOpt = serpApiClient.searchHotel(cache.getName(), checkIn, checkOut);
+            Optional<SerpApiClient.HotelData> hotelOpt = serpApiClient.searchHotel(cache.getName(), checkIn, checkOut, adults);
             if (hotelOpt.isEmpty()) return;
             SerpApiClient.HotelData h = hotelOpt.get();
 
@@ -156,6 +156,33 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 cache.setPricePerNightVnd(h.pricePerNightVnd());
                 changed = true;
             }
+            if (h.rating() != null && !h.rating().equals(cache.getRating())) {
+                cache.setRating(h.rating());
+                changed = true;
+            }
+            
+            if (h.propertyToken() != null && !h.propertyToken().isBlank()) {
+                List<Map<String, String>> photos = serpApiClient.fetchHotelPhotos(h.propertyToken());
+                if (photos != null && !photos.isEmpty()) {
+                    try {
+                        cache.setPhotosJson(objectMapper.writeValueAsString(photos));
+                        changed = true;
+                    } catch (Exception ex) {
+                        log.warn("Failed to serialize hotel photos: {}", ex.getMessage());
+                    }
+                }
+
+                List<Map<String, Object>> reviews = serpApiClient.fetchHotelReviews(h.propertyToken());
+                if (reviews != null && !reviews.isEmpty()) {
+                    try {
+                        cache.setReviewsJson(objectMapper.writeValueAsString(reviews));
+                        changed = true;
+                    } catch (Exception ex) {
+                        log.warn("Failed to serialize hotel reviews: {}", ex.getMessage());
+                    }
+                }
+            }
+
             if (changed) {
                 placeCacheService.save(cache);
                 log.info("Hotel enrich saved: cache id={} name='{}' price={} VNĐ booking={}",

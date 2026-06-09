@@ -138,7 +138,7 @@ class TripServiceImpl implements TripService {
                     placeOpt.ifPresent(place -> {
                         resolved.put(act, place);
                         if (type == ActivityType.ACCOMMODATION && dayDate != null) {
-                            placeEnrichmentService.enrichAccommodation(place, dayDate, dayDate.plusDays(1));
+                            placeEnrichmentService.enrichAccommodation(place, dayDate, dayDate.plusDays(1), request.getPeopleCount());
                         }
                     });
                 } catch (Exception e) {

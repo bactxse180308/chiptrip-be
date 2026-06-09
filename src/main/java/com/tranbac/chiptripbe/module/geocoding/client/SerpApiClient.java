@@ -131,6 +131,7 @@ public class SerpApiClient {
      * pricePerNightVnd: lấy từ rate_per_night.extracted_lowest, đã sẵn VNĐ do currency=VND.
      */
     public record HotelData(
+            String propertyToken,
             String name,
             Long pricePerNightVnd,
             BigDecimal rating,
@@ -146,7 +147,7 @@ public class SerpApiClient {
      * Trả candidate đầu tiên (best match theo SerpApi). Fail-soft → Optional.empty().
      */
     @SuppressWarnings("unchecked")
-    public Optional<HotelData> searchHotel(String name, LocalDate checkIn, LocalDate checkOut) {
+    public Optional<HotelData> searchHotel(String name, LocalDate checkIn, LocalDate checkOut, Integer adults) {
         if (!properties.isEnabled()) return Optional.empty();
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return Optional.empty();
         if (name == null || name.isBlank()) return Optional.empty();
@@ -160,6 +161,7 @@ public class SerpApiClient {
                             .queryParam("q", name)
                             .queryParam("check_in_date", checkIn.format(HOTEL_DATE_FORMAT))
                             .queryParam("check_out_date", checkOut.format(HOTEL_DATE_FORMAT))
+                            .queryParam("adults", adults != null ? adults.toString() : "2")
                             .queryParam("currency", "VND")
                             .queryParam("gl", "vn")
                             .queryParam("hl", "vi")
@@ -184,15 +186,40 @@ public class SerpApiClient {
     @SuppressWarnings("unchecked")
     private Optional<HotelData> parseHotelData(Map<String, Object> p) {
         try {
+            String propertyToken = stringOrNull(p.get("property_token"));
             String name = stringOrNull(p.get("name"));
             String link = stringOrNull(p.get("link"));
             BigDecimal rating = parseBigDecimal(p.get("overall_rating"));
 
             Long pricePerNight = null;
-            Object rateObj = p.get("rate_per_night");
-            if (rateObj instanceof Map<?, ?> rate) {
-                Object extracted = rate.get("extracted_lowest");
-                if (extracted instanceof Number n) pricePerNight = n.longValue();
+            
+            // Ưu tiên tìm Trip.com trong danh sách prices
+            Object pricesObj = p.get("prices");
+            if (pricesObj instanceof List<?> prices) {
+                for (Object item : prices) {
+                    if (item instanceof Map<?, ?> priceItem) {
+                        if ("Trip.com".equals(priceItem.get("source"))) {
+                            String tLink = stringOrNull(priceItem.get("link"));
+                            if (tLink != null) link = tLink; // Ghi đè link bằng link của Trip.com
+                            
+                            Object rateObj = priceItem.get("rate_per_night");
+                            if (rateObj instanceof Map<?, ?> rate) {
+                                Object extracted = rate.get("extracted_lowest");
+                                if (extracted instanceof Number n) pricePerNight = n.longValue();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Fallback nếu không tìm thấy Trip.com hoặc Trip.com không có giá
+            if (pricePerNight == null) {
+                Object rateObj = p.get("rate_per_night");
+                if (rateObj instanceof Map<?, ?> rate) {
+                    Object extracted = rate.get("extracted_lowest");
+                    if (extracted instanceof Number n) pricePerNight = n.longValue();
+                }
             }
 
             String thumbnail = null;
@@ -204,11 +231,119 @@ public class SerpApiClient {
                 if (thumbnail == null && firstImg.get("original_image") instanceof String orig) thumbnail = orig;
             }
 
-            if (name == null && link == null && pricePerNight == null) return Optional.empty();
-            return Optional.of(new HotelData(name, pricePerNight, rating, thumbnail, link));
+            if (name == null && link == null && pricePerNight == null && propertyToken == null) return Optional.empty();
+            return Optional.of(new HotelData(propertyToken, name, pricePerNight, rating, thumbnail, link));
         } catch (Exception e) {
             log.debug("Failed to parse hotel data: {}", e.getMessage());
             return Optional.empty();
+        }
+    }
+
+    /**
+     * Lấy danh sách ảnh chi tiết của Hotel từ SerpApi (google_hotels_photos engine).
+     * Yêu cầu propertyToken từ API google_hotels gốc.
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, String>> fetchHotelPhotos(String propertyToken) {
+        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (propertyToken == null || propertyToken.isBlank()) return List.of();
+
+        try {
+            log.info("SerpApi fetching hotel photos for propertyToken='{}'", propertyToken);
+            Map<String, Object> resp = client.get()
+                    .uri(b -> b.path("/search")
+                            .queryParam("engine", "google_hotels_photos")
+                            .queryParam("q", "hotel")
+                            .queryParam("property_token", propertyToken)
+                            .queryParam("api_key", properties.getApiKey())
+                            .build())
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                    .block();
+
+            if (resp == null) return List.of();
+
+            List<Map<String, Object>> photosList = (List<Map<String, Object>>) resp.get("photos");
+            if (photosList == null || photosList.isEmpty()) return List.of();
+
+            return photosList.stream()
+                    .map(p -> {
+                        String photoUrl = (String) p.get("original_image");
+                        String thumbnailUrl = (String) p.get("thumbnail");
+                        if (photoUrl == null) photoUrl = thumbnailUrl;
+                        if (photoUrl != null) {
+                            return Map.of("url", photoUrl, "thumbnail", thumbnailUrl != null ? thumbnailUrl : photoUrl);
+                        }
+                        return null;
+                    })
+                    .filter(java.util.Objects::nonNull)
+                    .limit(5)
+                    .toList();
+
+        } catch (Exception e) {
+            log.warn("SerpApi hotel photos fetch failed for propertyToken='{}': {}", propertyToken, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Lấy danh sách review của Hotel từ SerpApi (google_hotels_reviews engine).
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> fetchHotelReviews(String propertyToken) {
+        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (propertyToken == null || propertyToken.isBlank()) return List.of();
+
+        try {
+            log.info("SerpApi fetching hotel reviews for propertyToken='{}'", propertyToken);
+            Map<String, Object> resp = client.get()
+                    .uri(b -> b.path("/search")
+                            .queryParam("engine", "google_hotels_reviews")
+                            .queryParam("q", "hotel")
+                            .queryParam("property_token", propertyToken)
+                            .queryParam("api_key", properties.getApiKey())
+                            .build())
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                    .block();
+
+            if (resp == null) return List.of();
+
+            List<Map<String, Object>> reviewsList = (List<Map<String, Object>>) resp.get("reviews");
+            if (reviewsList == null || reviewsList.isEmpty()) return List.of();
+
+            return reviewsList.stream()
+                    .map(r -> {
+                        String author = "Ẩn danh";
+                        String text = (String) r.get("title");
+                        if (text == null) text = (String) r.get("body");
+                        
+                        BigDecimal rating = null;
+                        Object ratingObj = r.get("rating");
+                        if (ratingObj instanceof Number) {
+                            rating = BigDecimal.valueOf(((Number) ratingObj).doubleValue());
+                        }
+                        
+                        if (text != null && !text.isBlank()) {
+                            Map<String, Object> map = new java.util.HashMap<>();
+                            map.put("author", author);
+                            map.put("avatar", "");
+                            map.put("rating", rating != null ? rating : BigDecimal.valueOf(5));
+                            map.put("time", "Vừa xong");
+                            map.put("text", text);
+                            return map;
+                        }
+                        return null;
+                    })
+                    .filter(java.util.Objects::nonNull)
+                    .limit(3)
+                    .toList();
+
+        } catch (Exception e) {
+            log.warn("SerpApi hotel reviews fetch failed for propertyToken='{}': {}", propertyToken, e.getMessage());
+            return List.of();
         }
     }
 

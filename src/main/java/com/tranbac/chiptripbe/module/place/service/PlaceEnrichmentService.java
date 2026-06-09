@@ -25,5 +25,5 @@ public interface PlaceEnrichmentService {
      *
      * Chỉ gọi khi activity type=ACCOMMODATION.
      */
-    void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut);
+    void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut, Integer adults);
 }

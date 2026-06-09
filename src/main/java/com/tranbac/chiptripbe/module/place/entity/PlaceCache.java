@@ -80,6 +80,7 @@ public class PlaceCache extends BaseAuditEntity {
     private String serpTitle;
 
     /** Loại địa điểm theo Google Maps: "Restaurant", "Tourist attraction", ... */
+    @Nationalized
     @Column(name = "place_type", length = 100)
     private String placeType;
 

@@ -179,12 +179,14 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                 startTime = LocalTime.of(8, 0);
             }
 
-            long cost = aiActivity.getCostVnd() != null ? Math.max(0, aiActivity.getCostVnd()) : 0L;
-            dayCost += cost;
-
             ActivityType activityType = parseActivityType(aiActivity.getType());
-
             PlaceCache p = resolvedPlaces != null ? resolvedPlaces.get(aiActivity) : null;
+
+            long cost = aiActivity.getCostVnd() != null ? Math.max(0, aiActivity.getCostVnd()) : 0L;
+            if (p != null && p.getPricePerNightVnd() != null && activityType == ActivityType.ACCOMMODATION) {
+                cost = p.getPricePerNightVnd();
+            }
+            dayCost += cost;
             BigDecimal latitude = p != null ? p.getLatitude() : null;
             BigDecimal longitude = p != null ? p.getLongitude() : null;
             String placeId = p != null ? p.getGoongPlaceId() : null;
@@ -192,11 +194,10 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
             String geocodingProvider = p != null ? "goong" : null;
             Long placeCacheId = p != null ? p.getId() : null;
             String activityImageUrl = p != null ? extractFirstPhotoUrl(p.getPhotosJson()) : null;
-            // Fallback bookingUrl: AI thường không sinh, dùng link từ SerpApi Google Hotels nếu có.
-            String activityBookingUrl = aiActivity.getBookingUrl();
-            if ((activityBookingUrl == null || activityBookingUrl.isBlank()) && p != null) {
-                activityBookingUrl = p.getBookingUrl();
-            }
+            // Luôn ưu tiên dùng link từ SerpApi (đã chứa tham số ngày, số người) thay vì link generic của AI cho khách sạn
+            String activityBookingUrl = p != null && p.getBookingUrl() != null && !p.getBookingUrl().isBlank() 
+                                        ? p.getBookingUrl() 
+                                        : aiActivity.getBookingUrl();
 
             Activity activity = Activity.builder()
                     .day(day)
