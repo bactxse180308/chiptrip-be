@@ -59,15 +59,15 @@ app:
     client-id: ${GOOGLE_CLIENT_ID:}
     client-secret: ${GOOGLE_CLIENT_SECRET:}
   ai:
-    gemini:
-      api-key: ${GEMINI_API_KEY}
-      model: gemini-2.5-flash
-      base-url: https://generativelanguage.googleapis.com/v1beta
-    max-retries: 2
-    timeout-seconds: 60
+    openai-compat:
+      api-key: ${AI_API_KEY}
+      model: gemini-3.1-pro-preview
+      base-url: ${AI_BASE_URL}
+    max-retries: 1
+    timeout-seconds: 90
     pricing:
-      input-usd-per-1m: 0.075
-      output-usd-per-1m: 0.30
+      input-usd-per-1m: 3.00
+      output-usd-per-1m: 18.00
   goong:
     api-key: ${GOONG_API_KEY}
     base-url: https://rsapi.goong.io

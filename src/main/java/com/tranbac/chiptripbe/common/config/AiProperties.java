@@ -11,23 +11,23 @@ import org.springframework.stereotype.Component;
 @Setter
 public class AiProperties {
 
-    private GeminiConfig gemini = new GeminiConfig();
-    private int maxRetries = 2;
-    private int timeoutSeconds = 60;
+    private OpenAiCompat openaiCompat = new OpenAiCompat();
+    private int maxRetries = 1;
+    private int timeoutSeconds = 90;
     private Pricing pricing = new Pricing();
 
     @Getter
     @Setter
-    public static class GeminiConfig {
+    public static class OpenAiCompat {
         private String apiKey;
-        private String model = "gemini-2.5-flash";
-        private String baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+        private String model = "gemini-3.1-pro-preview";
+        private String baseUrl;
     }
 
     @Getter
     @Setter
     public static class Pricing {
-        private double inputUsdPer1m = 0.075;
-        private double outputUsdPer1m = 0.30;
+        private double inputUsdPer1m = 3.00;
+        private double outputUsdPer1m = 18.00;
     }
 }

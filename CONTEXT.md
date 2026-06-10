@@ -45,17 +45,19 @@
 - **ESLint + Prettier**
 
 ### Web — Backend
-- **Java 25+ với Spring Boot 4.x**
-- **Spring Web** (REST)
-- **Spring Security** + **JWT** (auth)
-- **Spring Data JPA**
-- **msSQL** (DB chính)
-
-- **MapStruct** (Entity ↔ DTO mapper)
+- **Java 21 với Spring Boot 4.0.6** (xác minh `pom.xml`: `java.version=21`, parent `spring-boot-starter-parent:4.0.6`)
+- **Spring Web MVC** (REST) + **Spring WebFlux/WebClient** (gọi Gemini, Goong, SerpApi, OpenWeather)
+- **Spring Security** + **JWT** (JJWT 0.12.6)
+- **Spring Data JPA** + Hibernate (`spring.jpa.hibernate.ddl-auto: update` — **chưa dùng Flyway**)
+- **Microsoft SQL Server** (DB chính — driver `com.microsoft.sqlserver:mssql-jdbc`, dialect `SQLServerDialect`)
+- **Spring Mail** (SMTP) + **Spring WebSocket/STOMP** (chat + notification realtime)
+- **MapStruct 1.6.3** (Entity ↔ DTO mapper) + **Lombok**
 - **Bean Validation** (Jakarta Validation)
-- **WebClient** (gọi LLM API & các API ngoài)
-- **JUnit 5 + Mockito + Testcontainers** (test)
-- **SpringDoc OpenAPI** (sinh Swagger từ code)
+- **bucket4j 8.10.1** (rate limit — in-memory `ConcurrentHashMap`)
+- **openhtmltopdf 1.1.37** (xuất lịch trình PDF)
+- **AWS SDK v2 S3 client** dùng cho **Cloudflare R2** (lưu ảnh chat hỗ trợ)
+- **JUnit 5 + Mockito + Testcontainers (MSSQL)** (test)
+- **SpringDoc OpenAPI 2.8.8** (sinh Swagger từ code)
 
 ### Mobile App
 - **Flutter 3+ với Dart**
@@ -71,17 +73,17 @@
 - **Không** tự train model. **Không** self-host model open-source ở MVP.
 
 ### API ngoài
-- **Goong REST API** (geocoding, autocomplete) + **Goong Map JS** (hiển thị bản đồ FE) + **SerpApi** (enrichment: rating, giờ mở cửa, ảnh)
-- **OpenWeather API** (dự báo thời tiết)
+- **Goong REST API** (`https://rsapi.goong.io`) — Forward Geocode V2 (`has_vnid`), Autocomplete, Place Detail, Direction, Distance Matrix, Reverse Geocode (proxy qua `/api/v1/routes/*`).
+- **Goong Map JS** (hiển thị bản đồ FE — token riêng có domain restriction).
+- **SerpApi** (`https://serpapi.com`) — engine `google_maps` / `google_maps_photos` / `google_maps_reviews` (rating, ảnh, giờ mở cửa, reviews) + `google_hotels` (giá phòng + bookingUrl).
+- **OpenWeather API** (dự báo thời tiết — `${OPENWEATHER_API_KEY}` optional).
+
+### Storage
+- **Cloudflare R2** (S3-compatible, gọi qua AWS SDK v2) — lưu ảnh upload từ luồng **Support Chat** (user ↔ admin). Cấu hình ở `app.r2.*` trong `application.yml`.
 
 ### Infra & DevOps
-- **Vercel** hoặc **Netlify** (deploy FE web)
-- **Railway** hoặc **Render** (deploy BE)
-- **Neon** hoặc **Supabase** (PostgreSQL cloud)
-- **GitHub** + **GitHub Actions** (CI/CD)
-- **Sentry** (error tracking)
-- **Google Analytics** (số liệu người dùng)
-- **Google Play Internal Testing / TestFlight** (phát hành app)
+- **GitHub** (source) — chưa chốt CI/CD pipeline, nền tảng deploy FE/BE và DB cloud.
+- Các hạng mục **Vercel / Netlify / Railway / Render / Sentry / Google Analytics / Internal Testing**: chưa chốt trong code.
 
 ---
 
@@ -94,19 +96,23 @@
                        │  HTTPS                         │
                        │  (JWT trong Authorization)     │
                        ▼                                ▼
-                ┌───────────────────────────────────────────┐
-                │      Backend — Spring Boot (REST API)     │
-                │  Controller → Service → Repository        │
-                │  Auth · Trip · AI · Maps · Weather        │
-                └───────┬───────────────────┬───────────────┘
+                ┌───────────────────────────────────────────────┐
+                │      Backend — Spring Boot 4 (REST + WS)      │
+                │  Controller → Service → Repository            │
+                │  Auth · Trip · AI · Place · Notification ·    │
+                │  Chat · External (Weather/Routes)             │
+                └───────┬───────────────────┬───────────────────┘
                         │                   │
                         ▼                   ▼
-                ┌────────────┐      ┌─────────────────┐
-                │ PostgreSQL │      │ External APIs   │
-                │ (Flyway    │      │ - LLM (Gemini)  │
-                │  migration)│      │ - Goong + SerpApi│
-                └────────────┘      │ - OpenWeather   │
-                                    └─────────────────┘
+                ┌────────────┐      ┌──────────────────────────┐
+                │  MSSQL     │      │ External APIs            │
+                │ (Hibernate │      │ - LLM (Gemini 2.5 Flash) │
+                │  ddl-auto: │      │ - Goong (geocode/routes) │
+                │   update)  │      │ - SerpApi (enrichment +  │
+                └────────────┘      │   Google Hotels)         │
+                                    │ - OpenWeather            │
+                                    │ - Cloudflare R2 (chat)   │
+                                    └──────────────────────────┘
 ```
 
 **Nguyên tắc:** Web và App **dùng chung 1 backend duy nhất**. API contract (OpenAPI) là "hợp đồng" — chốt sớm để 3 nhánh BE/FE/App có thể chạy song song.
@@ -115,151 +121,328 @@
 
 ## 5. Domain Model (lược đồ chính)
 
+> **Khóa chính (PK) thống nhất là `Long`** (auto-increment, `BaseEntity.id`). KHÔNG dùng UUID.
+> Mọi entity đều extends `BaseEntity` (id) hoặc `BaseAuditEntity` (id + createdAt + updatedAt).
+
 ```
-Role (1) ──< (n) User (1) ──< (n) Trip (1) ──< (n) Day (1) ──< (n) Activity
-                   │                │
-                   │                └──< (n) ChecklistItem
-                   └──< (n) AiUsage
+Role (1) ──< (n) User (1) ──< (n) Trip (1) ──< (n) TripDay (1) ──< (n) Activity ──> (0..1) PlaceCache
+                   │                │                                    
+                   │                ├──< (n) ChecklistItem
+                   │                ├──< (n) TripMember
+                   │                └──< (n) TripExpense
+                   ├──< (n) AiUsage  (trip nullable — giữ audit khi trip bị xoá)
+                   ├──< (n) Notification (recipient)
+                   ├──< (1) Conversation ──< (n) ChatMessage
+                   ├──< (n) RefreshToken / EmailVerificationToken / PasswordResetToken / OtpCode
 ```
 
-### Bảng & trường chính
+### Bảng & trường chính (kiểm tra từ entity Java tại `module/**/entity/*.java`)
 
-**Role**
-- `id` (Long, PK)
-- `name` (string, unique) — vd `ROLE_USER`, `ROLE_ADMIN`
+**Role** (`module/user/entity/Role.java`)
+- `id` (Long, PK), `name` (string, unique) — vd `ROLE_USER`, `ROLE_ADMIN`
 
-**User**
+**User** (`module/user/entity/User.java`)
 - `id` (Long, PK)
-- `email` (unique, indexed)
+- `email` (unique constraint `uk_users_email`)
 - `passwordHash` (BCrypt)
-- `fullName`
+- `fullName` (`@Nationalized`, nullable=false)
 - `avatarUrl` (nullable)
-- `aiCredits` (int, default 3) — số lượt AI còn lại
-- `isActive` (bool, default true) — khóa tài khoản khi `false`; `UserPrincipal.isEnabled()` đọc trường này
-- `emailVerified` (bool, default false)
-- `role` (`@ManyToOne Role`) — **một user có đúng một role** (không dùng many-to-many)
-- `lastLoginAt` (nullable)
+- `aiCredits` (Integer, default 3) — số lượt AI còn lại
+- `isActive` (Boolean, default true) — `UserPrincipal.isEnabled()` đọc trường này
+- `emailVerified` (Boolean, default false)
+- `role` (`@ManyToOne Role`, eager) — **một user có đúng một role**
+- `oauthProvider` (enum `OAuthProvider`, nullable), `oauthProviderId` (nullable) — dùng cho Google Login
+- `preferences` (`@Nationalized`, JSON string, nullable)
+- `lastLoginAt` (LocalDateTime, nullable)
+- `createdAt`, `updatedAt` (từ `BaseAuditEntity`)
+
+> **RBAC:** JWT claim `role` lưu tên role dạng string (vd `"ROLE_ADMIN"`). `@PreAuthorize("hasRole('ADMIN')")` đặt ở **class level** trên mọi admin controller; `SecurityConfig` cũng bảo vệ `/api/v1/admin/**` với `.hasRole("ADMIN")`. Role và admin mặc định được seed qua `DataSeeder` (`common/config/DataSeeder.java`).
+
+**Trip** (`module/trip/entity/Trip.java`)
+- `id` (Long, PK)
+- `user` (FK `users`)
+- `title` (`@Nationalized`) — AI sinh, vd "Hành trình Đà Nẵng 3 ngày"
+- `departure`, `destination` (`@Nationalized`)
+- `dateStart`, `dateEnd` (LocalDate)
+- `peopleCount` (Integer)
+- `budgetVnd` (Long, VNĐ) — **tên cột thật**, KHÔNG phải `budget`
+- `styles` (String, JSON serialized) — gu du lịch: `["food_tour", "couple", ...]`
+- `shareToken` (string, unique, nullable) — bật/tắt chia sẻ
+- `totalCost` — **DERIVED, tính từ `Activity.costVnd`**, không lưu cứng (xem `TripServiceImpl.buildTripDetailResponse`)
 - `createdAt`, `updatedAt`
+- Quan hệ: `days` (OneToMany TripDay), `checklist` (OneToMany ChecklistItem), `members` (OneToMany TripMember)
 
-> **RBAC:** JWT claim `role` lưu tên role dạng string (vd `"ROLE_ADMIN"`). `@PreAuthorize("hasRole('ADMIN')")` đặt ở **class level** trên mọi admin controller; `SecurityConfig` cũng bảo vệ `/api/v1/admin/**` với `.hasRole("ADMIN")`. Admin mặc định được seed qua `DataInitializer` (đọc `ADMIN_EMAIL` / `ADMIN_PASSWORD` từ env, bỏ qua nếu biến rỗng).
+**TripDay** (`module/trip/entity/TripDay.java`, table `trip_days`)
+- `id` (Long, PK), `trip` (FK), `dayNumber` (Integer), `date` (LocalDate)
+- `dayCost` — DERIVED (SUM `Activity.costVnd`)
 
-**Trip**
-- `id` (UUID, PK)
-- `userId` (FK User)
-- `title` (string) — AI sinh, vd "Hành trình Đà Nẵng 3 ngày"
-- `departure`, `destination` (string)
-- `dateStart`, `dateEnd` (date)
-- `peopleCount` (int)
-- `budget` (long, VNĐ)
-- `styles` (json/array) — gu du lịch đã chọn: ["food_tour", "couple", ...]
-- `totalCost` (long, computed) — **DERIVED, tính từ Activity.cost**, không lưu cứng
-- `createdAt`, `updatedAt`
+**Activity** (`module/trip/entity/Activity.java`)
+- `id` (Long, PK), `day` (FK TripDay)
+- `startTime` (LocalTime) — **tên cột thật**, KHÔNG phải `time`
+- `name` (`@Nationalized`), `description` (`@Nationalized`, length 1000)
+- `type` (enum `ActivityType`: FOOD, ATTRACTION, ACCOMMODATION, TRANSPORT, OTHER)
+- `costVnd` (Long, default 0) — **tên cột thật**, KHÔNG phải `cost`
+- `latitude`, `longitude` (BigDecimal precision 9, scale 6)
+- `imageUrl` (nullable), `bookingUrl` (nullable)
+- `displayOrder` (Integer)
+- `searchQuery` (`@Nationalized`) — AI sinh để backend geocode
+- `placeId` (Goong place id), `formattedAddress` (`@Nationalized`), `geocodingProvider` (vd `"goong"`)
+- `placeCacheId` (Long, FK mềm sang `place_cache.id`, nullable nếu không geocode được)
 
-**Day**
-- `id` (UUID, PK)
-- `tripId` (FK Trip)
-- `dayNumber` (int, 1..N)
-- `date` (date)
-- `dayCost` (long, computed) — SUM Activity.cost trong ngày
+**ChecklistItem** (`module/trip/entity/ChecklistItem.java`)
+- `id` (Long, PK), `trip` (FK)
+- `category` (enum `ChecklistCategory`: PAPERS, CLOTHES, HYGIENE, OTHER)
+- `name` (`@Nationalized`), `isChecked` (Boolean, default false), `displayOrder` (Integer)
 
-**Activity**
-- `id` (UUID, PK)
-- `dayId` (FK Day)
-- `time` (LocalTime) — vd 07:00
-- `name` (string)
-- `description` (text)
-- `type` (enum: TRANSPORT, ACCOMMODATION, FOOD, ATTRACTION, OTHER)
-- `cost` (long, VNĐ) — 0 nếu miễn phí
-- `lat`, `lng` (double)
-- `imageUrl` (string, nullable)
-- `bookingUrl` (string, nullable)
-- `displayOrder` (int) — cho phép sắp xếp lại
+**TripMember** (`module/trip/entity/TripMember.java`)
+- `id` (Long, PK), `trip` (FK), `user` (FK, nullable cho guest), `displayName` (`@Nationalized`), `role` (enum `TripMemberRole`)
 
-**ChecklistItem**
-- `id` (UUID, PK)
-- `tripId` (FK Trip)
-- `category` (enum: PAPERS, CLOTHES, HYGIENE, OTHER)
-- `name` (string) — vd "CMND/CCCD"
-- `isChecked` (bool, default false)
+**TripExpense** (`module/trip/entity/TripExpense.java`)
+- `id` (Long, PK), `trip` (FK), `paidBy`, `title` (`@Nationalized`), `amount` (Long, VNĐ), `category`, `splitAmong` (JSON string)
 
-**AiUsage** (log, để tính chi phí và rate-limit)
-- `id`, `userId`, `tripId`
-- `provider` (vd "openai", "gemini")
-- `tokensIn`, `tokensOut` (int)
-- `costUsd` (decimal)
-- `createdAt`
+**PlaceCache** (`module/place/entity/PlaceCache.java`, table `place_cache`)
+- Cache kết quả Goong geocode + SerpApi enrichment, dùng lại giữa các trip để giảm call API ngoài và hiển thị "place card".
+- `id`, `name`, `normalizedName`, `normalizedDestination`, `address`
+- `latitude`, `longitude`
+- `goongPlaceId`, `provinceName`, `communeName`
+- `bookingUrl`, `pricePerNightVnd` (cho ACCOMMODATION, từ SerpApi Google Hotels)
+- `serpDataId`, `serpPlaceId`, `serpTitle`, `placeType`, `hoursText`, `openState`
+- `rating` (BigDecimal precision 3,1), `reviewCount`
+- `openingHoursJson`, `photosJson`, `reviewsJson` (NVARCHAR(MAX))
+- `phone`, `website`
+- `lastSyncedAt` (Goong), `serpSyncedAt`, `serpEnriched` (bool)
+
+**AiUsage** (`module/ai/entity/AiUsage.java`, table `ai_usages`)
+- `id`, `user` (FK), `trip` (FK nullable — set null khi trip bị xoá để giữ audit log)
+- `provider` (string, vd `"gemini"`)
+- `tokensIn`, `tokensOut` (Integer)
+- `costUsd` (BigDecimal precision 10, scale 6)
+- `createdAt` (set ở `@PrePersist`)
+
+**Notification** (`module/notification/entity/Notification.java`)
+- `id`, `recipient` (FK User), `type` (enum `NotificationType`: `TRIP_MEMBER_ADDED`, `TRIP_REMINDER`, `AI_CREDITS_LOW`, `WEATHER_ALERT`)
+- `title`, `body` (`@Nationalized`)
+- `refId` (Long, polymorphic — vd tripId), `isRead` (boolean)
+- Index `(user_id, is_read, created_at)`. Chi tiết thiết kế xem `docs/notification-feature.md`.
+
+**Conversation / ChatMessage** (`module/chat/entity/*.java`) — hỗ trợ chat user ↔ admin
+- `Conversation`: `user`, `status`, `lastMessageAt`, `lastReadByUserMsgId`, `lastReadByAdminMsgId`, `subject`, `assignedAdminId`
+- `ChatMessage`: `conversation`, `sender`, `senderRole`, `messageType` (TEXT/IMAGE), `content`, `imageUrl`, `imageKey` (R2 object key)
+
+**Auth tokens** (`module/auth/entity/*.java`)
+- `RefreshToken`, `EmailVerificationToken`, `PasswordResetToken`, `OtpCode` — lưu SHA-256 hash (refresh), expiry, revoke.
 
 ---
 
 ## 6. API contract (chính)
 
-Tất cả endpoint dưới `/api/v1/`. Auth qua header `Authorization: Bearer <JWT>` (trừ `/auth/*`).
+Tất cả endpoint dưới `/api/v1/`. Auth qua header `Authorization: Bearer <JWT>` (trừ `/auth/*` và `/trips/shared/{token}`).
+Danh sách dưới đây liệt kê các nhóm endpoint thật, đối chiếu từ `module/**/controller/*.java`.
 
+### USER endpoints
+
+**Auth** (`AuthController`, prefix `/auth`):
 | Method | Endpoint | Mục đích |
 |---|---|---|
 | POST | `/auth/register` | Đăng ký |
 | POST | `/auth/login` | Đăng nhập, trả JWT + refresh token |
 | POST | `/auth/refresh` | Đổi refresh token lấy access token mới |
-| GET  | `/users/me` | Hồ sơ + số lượt AI còn lại |
-| POST | `/trips/generate` | **Sinh lịch trình bằng AI** (trừ 1 lượt AI) |
-| GET  | `/trips` | Danh sách chuyến của user (có phân trang) |
-| GET  | `/trips/{id}` | Chi tiết 1 chuyến (gồm days + activities) |
-| PATCH| `/trips/{id}/activities/{aid}` | Sửa 1 activity |
-| DELETE | `/trips/{id}` | Xoá chuyến |
-| GET  | `/weather?city=...&from=...&to=...` | Thời tiết theo ngày của chuyến |
-| GET  | `/places/search?q=...` | Autocomplete thành phố (Maps) |
+| POST | `/auth/logout` | Revoke refresh token |
+| POST | `/auth/send-otp` | Gửi OTP về email |
+| POST | `/auth/verify-otp` | Xác thực OTP |
+| POST | `/auth/forgot-password` | Gửi link reset password |
+| POST | `/auth/reset-password` | Đặt lại mật khẩu bằng token email |
+| POST | `/auth/reset-password-with-otp` | Đặt lại mật khẩu bằng OTP |
+| POST | `/auth/google` | Đăng nhập qua Google ID token |
 
-**Admin endpoints** (yêu cầu `ROLE_ADMIN`, tất cả dưới `/api/v1/admin/`):
-
+**Users** (`UserController` + `UserAiUsageController`):
 | Method | Endpoint | Mục đích |
 |---|---|---|
-| GET    | `/admin/stats/dashboard` | Tổng số user, trip, AI call & chi phí tháng này |
-| GET    | `/admin/stats/users?from=&to=` | Số user đăng ký theo ngày |
-| GET    | `/admin/stats/trips?from=&to=` | Số trip tạo theo ngày |
-| GET    | `/admin/stats/ai-cost?from=&to=` | Chi phí AI theo provider/tháng |
-| GET    | `/admin/users` | Danh sách user (filter: search, isActive, role) |
-| GET    | `/admin/users/{id}` | Chi tiết user + trips + AI usage |
-| PATCH  | `/admin/users/{id}` | Sửa fullName / aiCredits |
-| PATCH  | `/admin/users/{id}/status` | Bật/tắt tài khoản (`{ "enabled": true/false }`) |
-| POST   | `/admin/users/{id}/grant-credits` | Cộng AI credits (`{ "amount": N }`) |
-| POST   | `/admin/users/{id}/roles` | Đặt role cho user (`{ "role": "ROLE_ADMIN" }`) |
-| GET    | `/admin/trips` | Danh sách tất cả trip (filter: userId, from, to) |
-| GET    | `/admin/trips/{id}` | Chi tiết trip |
-| DELETE | `/admin/trips/{id}` | Xóa trip |
-| GET    | `/admin/ai-usages` | Log AI usage (filter: userId, provider, from, to) |
-| GET    | `/admin/ai-usages/summary` | Tổng hợp chi phí AI theo provider/tháng |
+| GET | `/users/me` | Hồ sơ + `aiCredits` còn lại |
+| PATCH | `/users/me` | Sửa `fullName`, `avatarUrl` |
+| POST | `/users/me/change-password` | Đổi mật khẩu |
+| POST | `/users/me/resend-verification` | Gửi lại email xác nhận |
+| DELETE | `/users/me` | Vô hiệu hoá tài khoản (soft delete) |
+| GET | `/users/search?q=...` | Tìm user (dùng cho mời thành viên) |
+| GET | `/users/me/ai-usage` | Lịch sử lượt AI đã dùng |
 
-**Quy ước response:**
+**Trips** (`TripController`):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| POST | `/trips/generate` | **Sinh lịch trình bằng AI** (trừ 1 lượt AI sau khi persist thành công) |
+| GET | `/trips` | Danh sách chuyến của user (phân trang) |
+| GET | `/trips/{id}` | Chi tiết chuyến (days + activities + checklist + members) |
+| PATCH | `/trips/{id}` | Sửa info chuyến |
+| DELETE | `/trips/{id}` | Xoá chuyến |
+| POST | `/trips/{id}/clone` | Nhân bản chuyến |
+| POST | `/trips/{id}/share` | Bật chia sẻ → sinh `shareToken` |
+| DELETE | `/trips/{id}/share` | Tắt chia sẻ |
+| GET | `/trips/shared/{shareToken}` | **Public** — xem qua link chia sẻ |
+| GET | `/trips/{id}/export/pdf` | Xuất lịch trình ra PDF (openhtmltopdf) |
+
+**Activities / Checklist / Members / Expenses** (con của Trip):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| POST/PATCH/DELETE | `/trips/{tripId}/days/{dayId}/activities[/...]` | CRUD activity |
+| POST | `/trips/{tripId}/days/{dayId}/activities/reorder` | Sắp xếp lại |
+| GET/POST/PATCH/DELETE | `/trips/{tripId}/checklist[/...]`, `/{itemId}/toggle` | CRUD + toggle |
+| GET/POST/PATCH/DELETE | `/trips/{tripId}/members[/{memberId}]` | Quản lý thành viên |
+| GET/POST/DELETE | `/trips/{tripId}/expenses[/{expenseId}]` | Chi phí chuyến đi |
+
+**Places / Routes / Weather** (proxy ra Goong / SerpApi / OpenWeather):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | `/places/search?q=...` | Goong Autocomplete |
+| GET | `/places/detail?placeId=...` | Goong Place Detail |
+| GET | `/places/{id}` | Chi tiết PlaceCache đã enrich (rating, ảnh, giờ, reviews) |
+| GET | `/routes/direction?oLat=&oLng=&dLat=&dLng=&vehicle=` | Goong Direction (proxy) |
+| POST | `/routes/distance-matrix` | Goong Distance Matrix |
+| GET | `/routes/reverse-geocode?lat=&lng=` | Reverse geocode → tên tỉnh/thành |
+| GET | `/weather?city=...&from=...&to=...` | Dự báo thời tiết các ngày trong chuyến |
+
+**AI Suggest** (`AiSuggestController`):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| POST | `/ai/suggest-destinations` | Gợi ý 3-5 điểm đến phù hợp |
+
+**Notifications** (`NotificationController`, REST + WebSocket STOMP):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | `/notifications` | Danh sách (phân trang) |
+| GET | `/notifications/unread-count` | Số chưa đọc (cho badge) |
+| PATCH | `/notifications/{id}/read` | Đánh dấu 1 noti đã đọc |
+| PATCH | `/notifications/read-all` | Đánh dấu tất cả |
+| WS | `/ws` (STOMP) + `/user/queue/notifications` | Push realtime (xem `docs/notification-feature.md`) |
+
+**Support Chat** (`ChatController`, user side):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | `/chat/conversation` | Lấy / tạo conversation đang mở |
+| GET | `/chat/conversation/messages` | Lịch sử tin nhắn |
+| POST | `/chat/messages` | Gửi tin text |
+| POST | `/chat/messages/image` (multipart) | Gửi ảnh (upload R2) |
+| PATCH | `/chat/conversation/read` | Đánh dấu đã đọc |
+
+### Admin endpoints (yêu cầu `ROLE_ADMIN`, prefix `/api/v1/admin/`)
+
+**Users / Roles** (`AdminUserController`, `AdminRoleController`):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | `/admin/users` | Danh sách (filter: search, isActive, role) |
+| GET | `/admin/users/{id}` | Chi tiết user |
+| PATCH | `/admin/users/{id}` | Sửa `fullName` / `aiCredits` |
+| PATCH | `/admin/users/{id}/status` | Bật/tắt (`{ "enabled": true/false }`) |
+| PATCH | `/admin/users/{id}/activate` | Bật |
+| PATCH | `/admin/users/{id}/deactivate` | Tắt (kèm revoke refresh tokens) |
+| POST | `/admin/users/{id}/grant-credits` | Cộng AI credits (`{ "amount": N }`) |
+| POST | `/admin/users/{id}/roles` | Gán role |
+| DELETE | `/admin/users/{id}/roles/{roleId}` | Gỡ role |
+| GET / POST / PATCH / DELETE | `/admin/roles[/{id}]` | Quản lý role |
+
+**Trips / AI Usage / Stats** (`AdminTripController`, `AdminAiUsageController`, `AdminStatsController`):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | `/admin/trips` | Danh sách tất cả trip |
+| GET | `/admin/trips/{id}` | Chi tiết trip |
+| DELETE | `/admin/trips/{id}` | Xoá trip |
+| GET | `/admin/ai-usages` | Log AI (filter userId, provider, from, to) |
+| GET | `/admin/ai-usages/summary` | Tổng hợp chi phí AI theo provider/tháng |
+| GET | `/admin/stats/dashboard` | Tổng quan |
+| GET | `/admin/stats/users?from=&to=` | Số user đăng ký theo ngày |
+| GET | `/admin/stats/trips?from=&to=` | Số trip tạo theo ngày |
+| GET | `/admin/stats/ai-cost?from=&to=` | Chi phí AI theo provider/tháng |
+
+**Support Chat (admin side)** (`AdminChatController`):
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | `/admin/chat/conversations` | Danh sách hội thoại |
+| GET | `/admin/chat/conversations/{id}/messages` | Lịch sử tin nhắn |
+| POST | `/admin/chat/conversations/{id}/messages` | Gửi text |
+| POST | `/admin/chat/conversations/{id}/messages/image` (multipart) | Gửi ảnh |
+| PATCH | `/admin/chat/conversations/{id}/read` | Đánh dấu đã đọc |
+| PATCH | `/admin/chat/conversations/{id}/close` | Đóng hội thoại |
+
+**Quy ước response** (`ApiResponse<T>` tại `common/response/ApiResponse.java`):
 ```json
 {
-  "data": { ... },          // nội dung chính
-  "error": null              // hoặc { "code": "...", "message": "..." }
+  "success": true,
+  "message": "...",
+  "data": { ... },
+  "meta": { ... },
+  "timestamp": "..."
 }
 ```
 
-**Quy ước lỗi:** dùng HTTP status đúng nghĩa (400 validation, 401 auth, 403 forbidden, 404 not found, 429 rate-limit, 500 server). Body lỗi chuẩn:
+**Quy ước lỗi** (`ErrorResponse` qua `GlobalExceptionHandler`): dùng HTTP status đúng nghĩa (400 validation, 401 auth, 403 forbidden, 404 not found, 429 rate-limit, 500 server). Body lỗi chuẩn:
 ```json
-{ "data": null, "error": { "code": "AI_NO_CREDITS", "message": "Hết lượt AI" } }
+{ "success": false, "code": "RATE_LIMIT_EXCEEDED", "message": "...", "details": null, "timestamp": "..." }
 ```
 
 ---
 
 ## 7. Tích hợp AI — quy ước quan trọng
 
-### 7.1. Luồng sinh lịch trình
+### 7.1. Luồng sinh lịch trình (theo code thật)
+
+Orchestration ở `TripServiceImpl.generateTrip` (`module/trip/service/impl/TripServiceImpl.java`)
+**KHÔNG** annotate `@Transactional` write — dùng `Propagation.NOT_SUPPORTED` để override class-level
+`@Transactional(readOnly=true)`, tránh giữ DB connection trong khi gọi Gemini (HTTP dài) và geocode.
+
 ```
 Client → POST /trips/generate (input)
-     → Backend: TripService
-        → Trừ aiCredits (transactional)
-        → AiService.generateItinerary(input)
-            → Gọi LLM API (JSON mode/Structured Output)
-            → Validate JSON theo schema
-            → Retry tối đa 2 lần nếu JSON sai
-        → Map JSON → Trip + Day + Activity entities (Mapper)
-        → Persist
-        → Log AiUsage
-     → Trả Trip đầy đủ
+   │
+   ▼
+TripServiceImpl.generateTrip()           (orchestration, KHÔNG @Transactional)
+   │
+   ├── 1. validateRequestAndCredits      (read-only tx ngắn)
+   │       - findById(user); throw nếu aiCredits <= 0
+   │       - dateStart >= today; dateEnd >= dateStart
+   │
+   ├── 2. AiService.generateItinerary    (NGOÀI transaction — gọi Gemini ~5-30s)
+   │       AiGenerateServiceImpl:
+   │       - Build system + user prompt (tiếng Việt, ép tên địa điểm thật)
+   │       - responseMimeType=application/json + responseSchema strict
+   │       - thinkingConfig.thinkingBudget=0 (tắt CoT của 2.5-flash, tránh timeout)
+   │       - retry tối đa max-retries (mặc định 2) nếu 429/5xx/timeout/JSON parse fail
+   │       - throw badRequest cho 400/401/403 (không retry)
+   │
+   ├── 3. AiItineraryValidator.validate  (fail-fast — không persist trip rác)
+   │       - Đủ số ngày, dayNumber duy nhất, date trong range
+   │       - Mỗi activity: name/time/type hợp lệ, costVnd >= 0
+   │       - Geocodable type (FOOD/ATTRACTION/ACCOMMODATION/TRANSPORT) phải có searchQuery,
+   │         KHÔNG được generic ("nhà hàng địa phương", "khách sạn trung tâm"...)
+   │       - Tổng cost ≤ budget × 1.10 hoặc ≤ budget + 1.000.000đ
+   │
+   ├── 4. resolvePlaces                  (HTTP calls Goong + SerpApi, fail-soft per activity)
+   │       Với mỗi activity geocodable & có searchQuery:
+   │       - PlaceEnrichmentService.resolvePlace(searchQuery, destination)
+   │           - PlaceCache lookup theo normalizedName + normalizedDestination
+   │           - Cache miss → GoongClient.forwardGeocode V2 (has_vnid)
+   │           - SerpApi enrich (rating/ảnh/giờ/reviews)
+   │           - Upsert PlaceCache trong tx ngắn riêng
+   │       - Nếu ACCOMMODATION: enrichAccommodation (SerpApi Google Hotels) lấy
+   │         pricePerNightVnd + bookingUrl theo dayDate
+   │       - Exception cho 1 activity → log warn, skip, trip vẫn được tạo
+   │
+   ▼
+TripGenerationPersistenceServiceImpl.persistGeneratedTrip   (@Transactional — 1 tx ngắn)
+   ├── Re-load user + RE-CHECK aiCredits (chống race với generate khác)
+   ├── Save Trip
+   ├── seedOwner (TripMember OWNER cho user)
+   ├── Với mỗi day → save TripDay → save Activity (gán lat/lng/placeId/placeCacheId
+   │   từ PlaceCache nếu resolve được; nếu ACCOMMODATION có pricePerNightVnd thì override cost)
+   ├── Save ChecklistItem
+   ├── ★ TRỪ aiCredits SAU KHI persist thành công ★
+   │   - Nếu Gemini lỗi nặng / validate fail → đã throw từ trước, user KHÔNG mất lượt
+   │   - Nếu remainingCredits <= 1 → publishEvent(AiCreditsLowEvent) → noti listener
+   ├── Log AiUsage (provider="gemini", tokensIn/out, costUsd theo pricing)
+   └── return TripGenerateResponse
 ```
+
+**Vì sao trừ credit SAU khi persist thành công (khác sơ đồ tài liệu cũ)?**
+Nếu trừ trước rồi rollback khi Gemini lỗi sẽ tạo ra trải nghiệm tệ với race condition và cần
+giữ tx mở khi gọi LLM. Code hiện tại có chủ đích đảo lại: gọi Gemini ngoài tx → chỉ trừ credit
+trong tx persist cuối cùng → fail-safe (user không mất lượt nếu Gemini/validate fail).
 
 ### 7.2. Yêu cầu prompt
 - **System prompt:** đóng vai chuyên gia du lịch Việt Nam, output **chỉ JSON**, không markdown, không prose.
@@ -268,7 +451,8 @@ Client → POST /trips/generate (input)
 - Giá trị `cost` luôn là **integer VNĐ**, không có dấu phẩy/đơn vị.
 - Tên địa điểm phải có thật ở Việt Nam, không bịa.
 
-### 7.3. Schema JSON kỳ vọng
+### 7.3. Schema JSON kỳ vọng (theo `AiGenerateServiceImpl.buildResponseSchema()` + DTO `AiItineraryResult`)
+
 ```json
 {
   "title": "string",
@@ -281,10 +465,9 @@ Client → POST /trips/generate (input)
           "time": "HH:mm",
           "name": "string",
           "description": "string",
-          "type": "TRANSPORT|ACCOMMODATION|FOOD|ATTRACTION|OTHER",
-          "cost": 350000,
-          "lat": 16.0544,
-          "lng": 108.2022,
+          "type": "FOOD|ATTRACTION|TRANSPORT|ACCOMMODATION|OTHER",
+          "costVnd": 350000,
+          "searchQuery": "Tên địa điểm cụ thể + tỉnh/thành. VD: 'Bánh căn Nhà Chung Đà Lạt'",
           "bookingUrl": "string|null"
         }
       ]
@@ -296,10 +479,25 @@ Client → POST /trips/generate (input)
 }
 ```
 
+**Lưu ý quan trọng (khác với tài liệu cũ):**
+- Field `costVnd` (INTEGER), **không phải** `cost`.
+- **KHÔNG có `lat` / `lng`** trong output AI. Backend tự geocode qua Goong từ `searchQuery`.
+- Mỗi activity geocodable (FOOD/ATTRACTION/ACCOMMODATION/TRANSPORT) phải có `searchQuery` đủ cụ thể —
+  validator `AiItineraryValidator` từ chối các query generic ("nhà hàng địa phương",
+  "khách sạn trung tâm", ...).
+- `required` trong schema: `time, name, description, type, costVnd, searchQuery`.
+
 ### 7.4. Bảo mật API key
-- **API key LLM/Maps/Weather đặt trong biến môi trường** (Spring đọc từ `${GEMINI_API_KEY}`, `${GOONG_API_KEY}`, `${SERPAPI_API_KEY}`, `${OPENWEATHER_API_KEY}`).
+
+- **API key đặt trong biến môi trường**. Spring đọc qua `@ConfigurationProperties` / `@Value`:
+  - `${GEMINI_API_KEY}` — bắt buộc (AI sinh lịch trình)
+  - `${GOONG_API_KEY}` — bắt buộc (geocoding + routes + autocomplete)
+  - `${SERPAPI_API_KEY}` — optional (enrichment + Google Hotels)
+  - `${OPENWEATHER_API_KEY}` — optional (`/weather` endpoint)
+  - `${R2_ENDPOINT}` / `${R2_ACCESS_KEY}` / `${R2_SECRET_KEY}` / `${R2_BUCKET_NAME}` / `${R2_PUBLIC_URL}` — cho chat upload ảnh
+  - `${JWT_SECRET}`, `${DB_URL}` / `${DB_USERNAME}` / `${DB_PASSWORD}` — hạ tầng
 - **Tuyệt đối không hardcode, không commit lên Git.**
-- Frontend **không** gọi LLM trực tiếp — chỉ gọi backend.
+- Frontend **không** gọi LLM trực tiếp; cũng **không** gọi Goong REST API trực tiếp — mọi call đều qua backend (`/api/v1/places/*`, `/api/v1/routes/*`).
 
 ---
 
@@ -379,7 +577,7 @@ Client → POST /trips/generate (input)
 | 2 | Thumbnail activity bị vỡ, hiện alt text | `<img>` có `onError` fallback về ảnh placeholder. Nếu LLM không trả `imageUrl`, dùng ảnh mặc định theo `type`. |
 | 3 | Widget thời tiết hiển thị tuần hiện tại thay vì ngày chuyến đi | Endpoint `/weather` nhận `from` và `to` của chuyến; FE map đúng ngày, ngày ngoài tầm dự báo hiển thị "—" thay vì giấu. |
 | 4 | Date picker cho phép chọn ngày quá khứ làm ngày khởi hành | `min={today}` cho HTML `<input type="date">` và validate phía BE: `dateStart >= today` và `dateEnd > dateStart`. |
-| 5 | Tài khoản có 0 lượt AI vẫn generate được | Backend kiểm tra `aiCredits > 0` trong **transaction**, trừ trước khi gọi LLM, rollback nếu LLM lỗi nặng. |
+| 5 | Tài khoản có 0 lượt AI vẫn generate được | `TripServiceImpl.validateRequestAndCredits` check `aiCredits > 0` trước khi gọi Gemini; sau khi LLM trả + validate + persist thành công, `TripGenerationPersistenceServiceImpl` **re-load user** và RE-CHECK credits trong tx persist (chống race) rồi mới trừ 1 lượt. Thiết kế có chủ đích: gọi Gemini NGOÀI transaction; trừ credit **SAU** khi persist OK → user không mất lượt nếu Gemini/validate fail. |
 | 6 | Preset ngân sách hở khoảng (2-3M và 5-8M không thuộc preset nào) | Thiết kế preset liền mạch, vd `<3M / 3-7M / 7M+`, hoặc cho input số tự do. |
 | 7 | Title lịch trình không khớp input người dùng | Prompt yêu cầu rõ "title phải nhắc tới điểm đến và ngân sách user chọn"; validate sau khi LLM trả về. |
 
@@ -400,7 +598,7 @@ Client → POST /trips/generate (input)
   - CORS chỉ cho phép domain FE chính thức.
   - Tất cả input validate phía BE (đừng tin FE).
   - Không log token, password, API key.
-  - Rate limit `POST /trips/generate`: tối đa 5 request/phút/user.
+  - Rate limit `POST /trips/generate`: **đã implement** — 5 request/phút/user (`RateLimitFilter` + bucket4j, `app.rate-limit.generate-limit=5`, `generate-window-minutes=1`). Giới hạn login 5/15 phút, register 3/60 phút, forgot-password 3/60 phút, default 60/phút. **Lưu ý**: bucket lưu trong `ConcurrentHashMap` in-memory → chỉ đúng khi chạy 1 instance; muốn scale ra nhiều instance cần backend phân tán (Redis).
 - **Accessibility (FE)**
   - Tất cả input có `<label>`; nút có `aria-label` khi cần.
   - Contrast text/background đạt WCAG AA.
@@ -443,9 +641,42 @@ Hỏi lại người dùng (sinh viên dev này là người ra quyết định 
   - Spring Boot: https://spring.io/projects/spring-boot
   - React Query: https://tanstack.com/query
   - Flutter: https://flutter.dev
-  - OpenAI Structured Outputs: https://platform.openai.com/docs/guides/structured-outputs
-  - Gemini JSON Mode: https://ai.google.dev/gemini-api/docs/structured-output
+  - Gemini Structured Output: https://ai.google.dev/gemini-api/docs/structured-output
+  - Goong REST API: https://docs.goong.io/rest/
+  - SerpApi Google Maps / Hotels: https://serpapi.com/google-maps-api / https://serpapi.com/google-hotels-api
 
 ---
 
 *File này là "single source of truth" về dự án. Khi có thay đổi quan trọng (đổi stack, thêm tính năng vào MVP, sửa API contract), cập nhật vào đây trước khi bắt tay code.*
+
+---
+
+## Changelog đồng bộ
+
+Sửa ngày 2026-06-09 để khớp với code thực tế. Mọi thay đổi đều có căn cứ từ một file Java/yaml trong repo.
+
+| Trước → Sau | Căn cứ (file code) |
+|---|---|
+| `Java 25+` → **`Java 21`** | `pom.xml` `<java.version>21</java.version>` |
+| `Spring Boot 4.x` → **`Spring Boot 4.0.6`** | `pom.xml` parent version 4.0.6 |
+| `msSQL (DB chính)` + nhắc tới **PostgreSQL / Neon / Supabase / Flyway** → **MSSQL** với `hibernate.ddl-auto: update` (chưa dùng Flyway) | `application.yml` `driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver`, `database-platform: SQLServerDialect`, `ddl-auto: update`; `pom.xml` dependency `mssql-jdbc`; không tồn tại folder `db/migration` |
+| Bổ sung **bucket4j**, **openhtmltopdf**, **AWS SDK v2 S3 / Cloudflare R2**, **Spring Mail**, **Spring WebSocket** vào tech stack | `pom.xml` dependencies tương ứng |
+| API ngoài chỉ nhắc Goong + SerpApi + OpenWeather (thay vì Google Maps API) | `application.yml` `app.goong.base-url=https://rsapi.goong.io`, `app.serpapi.base-url=https://serpapi.com`; `module/geocoding/client/GoongClient.java`; `module/geocoding/client/SerpApiClient.java` |
+| AI **"chốt provider sau spike P0.6"** → **đã chốt Gemini 2.5 Flash** với `thinkingBudget=0` | `application.yml` `app.ai.gemini.model=gemini-2.5-flash`; `AiGenerateServiceImpl.buildGeminiRequest()` set `thinkingConfig.thinkingBudget=0` |
+| Bổ sung **Cloudflare R2** cho upload ảnh chat | `application.yml` `app.r2.*`; `module/chat/entity/ChatMessage.java` field `imageKey`; `pom.xml` AWS SDK S3 |
+| Infra liệt kê **Vercel/Netlify/Railway/Render/Neon/Supabase/Sentry/Google Analytics** → ghi rõ "chưa chốt" trừ GitHub | Không có file deploy/CI nào tham chiếu các dịch vụ này trong repo |
+| Domain Model: **PK đổi từ UUID → `Long`** cho mọi entity | `common/entity/BaseEntity.java` `@GeneratedValue(strategy = IDENTITY)` + `Long id` |
+| User: field `name` → **`fullName`**; bổ sung `oauthProvider`, `oauthProviderId`, `preferences` | `module/user/entity/User.java` |
+| Trip: field `budget` → **`budgetVnd`**; bổ sung `shareToken`, `members` | `module/trip/entity/Trip.java` |
+| Day → đổi tên thật là **`TripDay`** (table `trip_days`) | `module/trip/entity/TripDay.java` |
+| Activity: `time` → **`startTime`**, `cost` → **`costVnd`**; bổ sung `searchQuery`, `placeId`, `formattedAddress`, `geocodingProvider`, `placeCacheId` | `module/trip/entity/Activity.java` |
+| AiUsage: provider example `"openai"` → chỉ `"gemini"` | `TripGenerationPersistenceServiceImpl.logAiUsage()` hardcode `"gemini"` |
+| Bổ sung **PlaceCache**, **TripMember**, **TripExpense**, **Notification**, **Conversation**, **ChatMessage**, **RefreshToken/Email/Password/Otp tokens** vào lược đồ | `module/place/entity/PlaceCache.java`, `module/trip/entity/TripMember.java`, `module/trip/entity/TripExpense.java`, `module/notification/entity/Notification.java`, `module/chat/entity/Conversation.java` & `ChatMessage.java`, `module/auth/entity/*.java` |
+| API contract mở rộng: bổ sung **Auth (OTP/Google/Logout/reset-with-otp)**, **PATCH /trips/{id}/activities/{aid}** thay bằng path đúng `/trips/{tripId}/days/{dayId}/activities/{activityId}`, **Trip Members/Expenses/Clone/Share/Shared/Export PDF**, **Places detail / Place card / Routes (Direction/DistanceMatrix/ReverseGeocode)**, **AI suggest-destinations**, **Notifications (REST + WS)**, **Support Chat (user + admin)**, **Admin chat/role/activate/deactivate** | Liệt kê đầy đủ các `@RestController` trong `module/**/controller/*.java` |
+| Quy ước response: từ `{ data, error }` → **`ApiResponse<T>` thực tế** với `success/message/data/meta/timestamp` | `common/response/ApiResponse.java` |
+| **Luồng generate (mục 7.1)** viết lại theo code thật: orchestration **KHÔNG @Transactional** (Propagation.NOT_SUPPORTED), trừ credit **SAU** persist, có bước validate strict + geocode + enrichment | `TripServiceImpl.generateTrip` (line 84 `Propagation.NOT_SUPPORTED`), `AiItineraryValidator`, `PlaceEnrichmentService`, `TripGenerationPersistenceServiceImpl.persistGeneratedTrip` line 89-95 (trừ credit sau persist) |
+| **JSON schema (mục 7.3)** sửa `cost` → `costVnd`, bỏ `lat`/`lng`, thêm `searchQuery` | `AiGenerateServiceImpl.buildResponseSchema()` line 154-203 |
+| **API key (mục 7.4)**: bỏ `${OPENAI_API_KEY}`; ghi rõ `${GEMINI_API_KEY}`, `${GOONG_API_KEY}`, `${SERPAPI_API_KEY}`, `${OPENWEATHER_API_KEY}`, R2 keys, JWT/DB | `application.yml` toàn bộ block `app.*` |
+| **Bug #5** cách xử lý: bỏ "trừ trước khi gọi LLM, rollback nếu LLM lỗi" → mô tả thiết kế thật (trừ sau khi persist OK, gọi LLM ngoài tx) | `TripServiceImpl.generateTrip` + `TripGenerationPersistenceServiceImpl` |
+| **Rate limit** từ "tối đa 5/phút/user" (yêu cầu) → "đã implement" với in-memory limitation note | `common/config/RateLimitProperties.java`, `common/filter/RateLimitFilter.java` (bucket4j + ConcurrentHashMap) |
+| Mục 14 bỏ link tham khảo OpenAI Structured Outputs, thêm link Goong + SerpApi | Không còn dùng OpenAI ở mọi nơi trong code |

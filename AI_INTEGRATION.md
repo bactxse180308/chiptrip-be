@@ -24,46 +24,59 @@ Frontend (React)
          styles: ["food", "healing"]
        }
 
-Backend — TripServiceImpl.generateTrip()
-  ├─ 1. Validate user tồn tại
-  ├─ 2. Check aiCredits > 0
-  ├─ 3. Validate startDate >= today, endDate > startDate
+Backend — TripServiceImpl.generateTrip()  (KHÔNG @Transactional — Propagation.NOT_SUPPORTED)
+  ├─ 1. validateRequestAndCredits (read-only tx ngắn)
+  │       - findById(user); throw badRequest nếu aiCredits <= 0
+  │       - startDate >= today, endDate >= startDate
   │
-  ├─ 4. AiService.generateItinerary(request)
+  ├─ 2. AiService.generateItinerary(request)  (NGOÀI transaction — tránh giữ DB connection)
   │       └─ AiGenerateServiceImpl
   │             ├─ Build system prompt + user prompt (tiếng Việt)
   │             ├─ Build responseSchema strict (bắt AI trả đúng format)
   │             ├─ POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
   │             │    responseMimeType: application/json, responseSchema, thinkingConfig.thinkingBudget=0
   │             ├─ Parse JSON → AiItineraryResult
-  │             ├─ Validate: days không rỗng, activity có time+name+searchQuery
-  │             ├─ Retry tối đa 2 lần nếu: 429 / 5xx / timeout / parse fail / validate fail
+  │             ├─ Pre-validate trong parseAndValidate: days không rỗng, time+name, searchQuery cho type geocodable
+  │             ├─ Retry tối đa max-retries (mặc định 2) nếu: 429 / 5xx / timeout / parse fail / validate fail
+  │             ├─ 400/401/403 → throw AppException.badRequest, KHÔNG retry
   │             └─ Trả AiCallResult { itinerary, promptTokens, completionTokens }
   │
-  ├─ 5. Tạo Trip entity, save DB
+  ├─ 3. AiItineraryValidator.validate(itinerary, request)  (fail-fast strict)
+  │       - Đủ số ngày, dayNumber duy nhất, date trong [startDate, endDate]
+  │       - Activity hợp lệ: type, time HH:mm, costVnd ≥ 0
+  │       - Type geocodable phải có searchQuery, KHÔNG generic (vd "khách sạn trung tâm")
+  │       - Tổng cost ≤ budget × 1.10 hoặc ≤ budget + 1.000.000đ
   │
-  ├─ 6. Với mỗi AiDay → TripDay entity
-  │       └─ Với mỗi AiActivity:
-  │             ├─ Parse ActivityType (FOOD/ATTRACTION/TRANSPORT/ACCOMMODATION/OTHER)
-  │             ├─ Nếu type là FOOD / ATTRACTION / ACCOMMODATION:
-  │             │    └─ PlaceEnrichmentService.resolvePlace(searchQuery, destination)
-  │             │         └─ GoongGeocodingService (GoongClient) + SerpApiClient (enrichment)
-  │             │               ├─ GET https://rsapi.goong.io/geocode (hoặc /Place/AutoComplete)
-  │             │               │    address: "Bánh căn Nhà Chung Đà Lạt, Đà Lạt"
-  │             │               ├─ Parse kết quả đầu tiên → PlaceCache (lat/lng, address, placeId)
-  │             │               ├─ SerpApi enrich: rating, giờ mở cửa, ảnh (cache PlaceCache)
-  │             │               └─ Nếu fail/không tìm thấy → Optional.empty() (graceful)
-  │             ├─ Activity.latitude/longitude = từ PlaceCache (hoặc null)
-  │             ├─ Activity.placeId, formattedAddress, geocodingProvider = "goong", placeCacheId, imageUrl
-  │             └─ Save Activity
+  ├─ 4. resolvePlaces  (HTTP calls, fail-soft per activity)
+  │       Với mỗi activity geocodable & có searchQuery:
+  │       └─ PlaceEnrichmentService.resolvePlace(searchQuery, destination)
+  │           ├─ PlaceCache lookup theo normalizedName + normalizedDestination
+  │           ├─ Cache miss → GoongClient.forwardGeocode V2 (has_vnid)
+  │           │     → lat/lng + placeId + formattedAddress + provinceName/communeName
+  │           ├─ SerpApi enrich (engine google_maps/google_maps_photos/google_maps_reviews)
+  │           │     → rating, ảnh, giờ mở cửa, reviews → lưu vào PlaceCache
+  │           ├─ Nếu ACCOMMODATION: enrichAccommodation gọi SerpApi google_hotels
+  │           │     → pricePerNightVnd + bookingUrl theo dayDate
+  │           └─ Exception cho 1 activity → log warn, skip activity, trip vẫn tạo
   │
-  ├─ 7. Với mỗi AiChecklistItem → ChecklistItem entity, save DB
-  │
-  ├─ 8. Trừ user.aiCredits (sau khi persist thành công)
-  │
-  ├─ 9. Log AiUsage { provider="gemini", tokensIn, tokensOut, costUsd }
-  │
-  └─ 10. Trả TripGenerateResponse (id, title, days, activities, checklist, totalCostVnd)
+  ▼
+TripGenerationPersistenceServiceImpl.persistGeneratedTrip   (@Transactional — 1 tx)
+  ├─ Re-load user + RE-CHECK aiCredits (chống race giữa các generate request)
+  ├─ Save Trip, seedOwner (TripMember OWNER)
+  ├─ Với mỗi AiDay → save TripDay
+  │   └─ Với mỗi AiActivity:
+  │         ├─ Lấy PlaceCache từ resolvedPlaces map (identity-keyed)
+  │         ├─ Set lat/lng, placeId, formattedAddress, geocodingProvider="goong", placeCacheId
+  │         ├─ Nếu ACCOMMODATION & PlaceCache.pricePerNightVnd != null → override costVnd
+  │         ├─ Ưu tiên PlaceCache.bookingUrl (đã có check_in/check_out) hơn aiActivity.bookingUrl
+  │         ├─ imageUrl = ảnh đầu từ PlaceCache.photosJson
+  │         └─ Save Activity
+  ├─ Save ChecklistItem
+  ├─ ★ TRỪ user.aiCredits SAU khi persist thành công ★
+  │     - Nếu Gemini/validate/persist throw → KHÔNG mất lượt
+  │     - remainingCredits <= 1 → publishEvent(AiCreditsLowEvent) → noti listener
+  ├─ Log AiUsage { provider="gemini", tokensIn/out, costUsd theo pricing config }
+  └─ Trả TripGenerateResponse (id, title, days, activities, checklist, totalCostVnd)
 
 Frontend — Result page
   └─ Render lịch trình từ response
@@ -221,12 +234,18 @@ app:
 | `FOOD` | Có |
 | `ATTRACTION` | Có |
 | `ACCOMMODATION` | Có |
-| `TRANSPORT` | Không |
+| `TRANSPORT` | **Có** |
 | `OTHER` | Không |
 
+> **Sửa drift:** TRANSPORT cần geocode để có lat/lng cho sân bay / bến xe / nhà ga (vd "Sân bay Liên Khương Đà Lạt"). Xác minh ở 3 chỗ trong code, tất cả đều bao gồm TRANSPORT:
+> - `TripServiceImpl.shouldGeocode()` (line 425)
+> - `AiGenerateServiceImpl.isGeocodableType()` (line 295)
+> - `AiItineraryValidator.needsSearchQuery()` (line 162)
+
 - Nếu Goong trả về kết quả → lưu `latitude`, `longitude`, `placeId`, `formattedAddress`, `geocodingProvider = "goong"`, `placeCacheId`
-- SerpApi enrich thêm rating / giờ mở cửa / ảnh và cache vào `PlaceCache` (TTL `cache-ttl-days`)
-- Nếu không tìm thấy hoặc lỗi → `latitude/longitude = null`, không throw exception (graceful fallback)
+- SerpApi enrich thêm rating / giờ mở cửa / ảnh / reviews vào `PlaceCache` (TTL `cache-ttl-days`, backoff `retry-backoff-minutes`)
+- Với `ACCOMMODATION`: gọi thêm SerpApi `google_hotels` lấy `pricePerNightVnd` + `bookingUrl` theo `dayDate` (check-in/check-out)
+- Nếu không tìm thấy hoặc lỗi → `latitude/longitude = null`, không throw exception (graceful fallback per-activity)
 - Query gửi đi: `"<searchQuery>, <destination>"` (append destination nếu chưa có trong query)
 
 ---
@@ -284,3 +303,19 @@ Frontend gửi `budgetVnd` là số VNĐ thật. Mapping từ index preset:
 | 7 | 12M+ | 15,000,000 |
 
 Nếu user nhập custom → parse số trực tiếp (bỏ ký tự không phải chữ số).
+
+---
+
+## Changelog đồng bộ
+
+Sửa ngày 2026-06-09 để khớp với code thực tế.
+
+| Trước → Sau | Căn cứ (file code) |
+|---|---|
+| Sơ đồ luồng generate cũ: "Check aiCredits", "Tạo Trip, save DB", "Trừ aiCredits (sau khi persist thành công)" mô tả flat — không thể hiện việc orchestration KHÔNG @Transactional và việc trừ credit nằm trong service persist riêng | `TripServiceImpl.java` line 84 `@Transactional(propagation = Propagation.NOT_SUPPORTED)`; `TripGenerationPersistenceServiceImpl.java` line 62 `@Transactional`, line 89-95 trừ credit + publish event sau khi persist |
+| Thiếu bước **AiItineraryValidator.validate** (validator riêng strict bên ngoài AiGenerateServiceImpl) | `module/ai/service/AiItineraryValidator.java` (toàn file) |
+| Bảng "Logic geocode" **TRANSPORT = Không** → **TRANSPORT = Có** | `TripServiceImpl.shouldGeocode()` line 425-430, `AiGenerateServiceImpl.isGeocodableType()` line 295-298, `AiItineraryValidator.needsSearchQuery()` line 162-168 — cả 3 đều include TRANSPORT |
+| Mô tả enrichment chỉ nhắc "rating / giờ mở cửa / ảnh" → bổ sung **reviews** + đặc biệt **SerpApi google_hotels cho ACCOMMODATION** (pricePerNightVnd + bookingUrl) | `PlaceCache.java` field `reviewsJson`, `pricePerNightVnd`, `bookingUrl`; `TripGenerationPersistenceServiceImpl.persistDay` line 186-200 ưu tiên `PlaceCache.bookingUrl` |
+| Mô tả "Cấu hình môi trường" bỏ `GOONG_MAP_TOKEN` không tham chiếu trong backend (chỉ FE dùng) | `application.yml` không có entry `goong.map-token`; backend chỉ dùng `${GOONG_API_KEY}` |
+
+Sơ đồ JSON schema và mục "Schema JSON AI trả về" đã đúng (`costVnd`, `searchQuery`, không có `lat`/`lng`) — đối chiếu với `AiGenerateServiceImpl.buildResponseSchema()`.

@@ -111,7 +111,7 @@ Chia theo **bounded context** để 2 dev ít đụng nhau:
 | # | Method | Path | Mô tả | Auth | Module |
 |---|---|---|---|---|---|
 | 18 | `GET`  | `/trips/{id}/export/pdf` | Xuất chuyến đi ra PDF | USER (owner) | trip |
-| 19 | `GET`  | `/places/search?q=hà+nội` | Autocomplete tên thành phố (proxy Google Maps) | USER | external |
+| 19 | `GET`  | `/places/search?q=hà+nội` | Autocomplete tên địa điểm (proxy Goong REST) | USER | external |
 | 20 | `GET`  | `/weather?city=...&from=...&to=...` | Dự báo thời tiết ngày trong chuyến | USER | external |
 | 21 | `GET`  | `/users/me/ai-usage` | Lịch sử lượt AI đã dùng (số lần, chi phí) | USER | ai |
 
@@ -143,7 +143,7 @@ Chia theo **bounded context** để 2 dev ít đụng nhau:
 | Tổng endpoint | 24 (12 USER + 12 ADMIN) | 30 (21 USER + 1 PUBLIC + 8 ADMIN) |
 | Module sở hữu | `auth/`, `user/` | `trip/`, `ai/`, `external/`, `stats/` |
 | Entity sở hữu | `User`, `Role`, `RefreshToken` | `Trip`, `TripDay`, `Activity`, `ChecklistItem`, `AiUsage` |
-| Tích hợp ngoài | Email service (SMTP/SendGrid) | LLM API, Google Maps, OpenWeather |
+| Tích hợp ngoài | Email service (SMTP) | Gemini, Goong REST, SerpApi, OpenWeather |
 | Trách nhiệm chung | **Shared infra** (Security, ApiResponse, BaseEntity, ExceptionHandler) | — |
 
 ---
@@ -250,3 +250,15 @@ Các endpoint sau **chưa cần** ở MVP — để Phase 2:
 ---
 
 *File này là "hợp đồng" giữa 2 dev BE. Khi thêm/sửa/xoá endpoint, cập nhật file này trước rồi mới code.*
+
+---
+
+## Changelog đồng bộ
+
+Sửa ngày 2026-06-09 để khớp với code thực tế.
+
+| Trước → Sau | Căn cứ (file code) |
+|---|---|
+| `/places/search` mô tả "proxy Google Maps" → **"proxy Goong REST"** | `module/external/controller/ExternalController.java` line 28 + `module/external/service/ExternalApiService` gọi `GoongClient.autocomplete()` |
+| "Tích hợp ngoài: LLM API, Google Maps, OpenWeather" → **"Gemini, Goong REST, SerpApi, OpenWeather"** | `application.yml` `app.ai.gemini.*`, `app.goong.*`, `app.serpapi.*`, `app.external.openweather-api-key` |
+| Email service "(SMTP/SendGrid)" → **chỉ "SMTP"** | `application.yml` `spring.mail.*` (SMTP Gmail), không có SendGrid dependency trong `pom.xml` |

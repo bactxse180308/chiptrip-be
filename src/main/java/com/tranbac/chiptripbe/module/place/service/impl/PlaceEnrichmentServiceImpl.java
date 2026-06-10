@@ -1,6 +1,7 @@
 package com.tranbac.chiptripbe.module.place.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tranbac.chiptripbe.common.util.PlaceQueryUtil;
 import com.tranbac.chiptripbe.module.geocoding.client.GoongClient;
 import com.tranbac.chiptripbe.module.geocoding.client.SerpApiClient;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
@@ -63,7 +64,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         }
 
         // 2. Goong geocode — bắt buộc để có lat/lng
-        String geocodeQuery = buildGeocodeQuery(cleanedName, destination);
+        String geocodeQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
         Optional<GoongClient.GeocodeResult> geoOpt = goongClient.forwardGeocode(geocodeQuery);
         if (geoOpt.isEmpty()) {
             log.debug("Goong geocode: không tìm thấy '{}'", geocodeQuery);
@@ -208,7 +209,9 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                                                 GoongClient.GeocodeResult geo,
                                                 String originalName) {
         try {
-            String serpQuery = cleanedName + (destination != null ? " " + destination : "") + " Việt Nam";
+            // AI đã được instruct để đưa city vào searchQuery, không append destination trip nữa
+            // (tránh "Sân bay Nội Bài Hà Nội Đà Lạt Việt Nam" — SerpApi tìm nhầm thành phố)
+            String serpQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
             List<SerpApiClient.PlaceData> candidates = serpApiClient.searchPlaceCandidates(serpQuery);
             if (candidates.isEmpty()) {
                 log.debug("SerpApi không trả về candidate cho '{}', áp dụng backoff", serpQuery);
@@ -441,12 +444,6 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 .replaceAll("[^a-z0-9\\s]", "")
                 .replaceAll("\\s+", " ")
                 .trim();
-    }
-
-    private String buildGeocodeQuery(String placeName, String destination) {
-        if (destination == null || destination.isBlank()) return placeName + ", Việt Nam";
-        if (placeName.toLowerCase().contains(destination.toLowerCase())) return placeName + ", Việt Nam";
-        return placeName + ", " + destination + ", Việt Nam";
     }
 
     private String buildPhotosJson(String thumbnailUrl) {

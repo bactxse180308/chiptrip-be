@@ -7,7 +7,6 @@ import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
-import com.tranbac.chiptripbe.module.ai.service.AiItineraryValidator;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
@@ -59,7 +58,6 @@ class TripServiceImpl implements TripService {
     private final TripMemberService tripMemberService;
     private final UserRepository userRepository;
     private final AiService aiService;
-    private final AiItineraryValidator aiItineraryValidator;
     private final AiUsageRepository aiUsageRepository;
     private final ObjectMapper objectMapper;
     private final PlaceEnrichmentService placeEnrichmentService;
@@ -86,7 +84,6 @@ class TripServiceImpl implements TripService {
         validateRequestAndCredits(userId, request);
 
         AiCallResult aiCallResult = aiService.generateItinerary(request);
-        aiItineraryValidator.validate(aiCallResult.itinerary(), request);
 
         Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces =
                 resolvePlaces(aiCallResult.itinerary(), request);

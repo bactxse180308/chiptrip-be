@@ -1,5 +1,6 @@
 package com.tranbac.chiptripbe.module.geocoding.service.impl;
 
+import com.tranbac.chiptripbe.common.util.PlaceQueryUtil;
 import com.tranbac.chiptripbe.module.geocoding.client.GoongClient;
 import com.tranbac.chiptripbe.module.geocoding.dto.GeocodingResult;
 import com.tranbac.chiptripbe.module.geocoding.service.GeocodingService;
@@ -35,8 +36,9 @@ class GoongGeocodingService implements GeocodingService {
     }
 
     private String buildQuery(String query, String destination) {
-        if (destination == null || destination.isBlank()) return query + ", Việt Nam";
-        if (query.toLowerCase().contains(destination.toLowerCase())) return query + ", Việt Nam";
-        return query + ", " + destination + ", Việt Nam";
+        // AI đã được instruct để đưa city vào searchQuery, không append destination trip nữa
+        // (tránh "Sân bay Nội Bài Hà Nội, Đà Lạt, Việt Nam" — Goong tìm nhầm thành phố).
+        // destination param giữ lại để giữ tương thích interface nhưng không sử dụng.
+        return PlaceQueryUtil.buildPlaceQuery(query);
     }
 }
