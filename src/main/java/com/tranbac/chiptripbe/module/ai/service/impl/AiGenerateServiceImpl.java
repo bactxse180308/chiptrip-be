@@ -94,6 +94,12 @@ class AiGenerateServiceImpl implements AiService {
                 - Phân bổ chi phí hợp lý, tổng không vượt ngân sách.
                 - type phải là một trong: FOOD, ATTRACTION, TRANSPORT, ACCOMMODATION, OTHER.
                 - category trong checklist phải là một trong: PAPERS, CLOTHES, HYGIENE, OTHER.
+                - title phải nhắc đến điểm đến và số ngày của chuyến đi.
+                  Ví dụ đúng: "Hành trình Đà Lạt 3 ngày 2 đêm".
+                - Mỗi ngày nên có 4-6 hoạt động, không nhồi quá nhiều, để lịch trình thực tế và khả thi.
+                - description ngắn gọn, 1-2 câu, đi thẳng vào nội dung.
+                - bookingUrl để null nếu không chắc chắn link có thật. KHÔNG bịa URL.
+                - Với type OTHER không phải địa điểm cụ thể (vd "nghỉ ngơi", "tự do"), searchQuery có thể để null.
                 """;
 
         long numDays = java.time.temporal.ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + 1;
