@@ -64,12 +64,8 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                                                      GenerateTripRequest request,
                                                      AiCallResult aiResult,
                                                      Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces) {
-        // Re-load user trong tx persist + tái-kiểm credits (tránh race với generate request khác)
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
-        if (user.getAiCredits() <= 0) {
-            throw AppException.badRequest("Hết lượt AI. Vui lòng mua thêm credits.");
-        }
 
         AiItineraryResult itinerary = aiResult.itinerary();
 
@@ -86,16 +82,21 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
 
         List<TripGenerateResponse.ChecklistDetail> checklistDetails = persistChecklist(trip, itinerary);
 
-        // Trừ credits sau khi persist thành công
-        int remainingCredits = user.getAiCredits() - 1;
-        user.setAiCredits(remainingCredits);
-        userRepository.save(user);
+        // Log AiUsage TRƯỚC khi trừ credit — vì @Modifying(clearAutomatically=true) sẽ detach context.
+        // Nếu deduct fail (return 0), throw ném ra rollback toàn bộ tx → AiUsage cũng rollback.
+        logAiUsage(user, trip, aiResult);
 
-        if (remainingCredits <= 1) {
-            eventPublisher.publishEvent(new AiCreditsLowEvent(userId, remainingCredits));
+        // Trừ credit atomic — chống lost update khi 2 generate request chạy song song
+        int updated = userRepository.deductCreditIfAvailable(userId);
+        if (updated == 0) {
+            throw AppException.badRequest("Hết lượt AI. Vui lòng mua thêm credits.");
         }
 
-        logAiUsage(user, trip, aiResult);
+        // Sau clearAutomatically, persistence context đã clear → query lại để có số mới
+        Integer remainingCredits = userRepository.findAiCreditsById(userId);
+        if (remainingCredits != null && remainingCredits <= 1) {
+            eventPublisher.publishEvent(new AiCreditsLowEvent(userId, remainingCredits));
+        }
 
         log.info("Generated trip id={} for userId={} with {} days via AI (tokens: {}+{})",
                 trip.getId(), userId, dayDetails.size(),
@@ -266,7 +267,7 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
         aiUsageRepository.save(AiUsage.builder()
                 .user(user)
                 .trip(trip)
-                .provider("gemini")
+                .provider("gemini-3.1-pro-preview")
                 .tokensIn(aiResult.promptTokens())
                 .tokensOut(aiResult.completionTokens())
                 .costUsd(costUsd)
