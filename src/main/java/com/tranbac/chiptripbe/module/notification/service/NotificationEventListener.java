@@ -5,8 +5,12 @@ import com.tranbac.chiptripbe.module.notification.entity.Notification;
 import com.tranbac.chiptripbe.module.notification.enums.NotificationType;
 import com.tranbac.chiptripbe.module.notification.event.AiCreditsLowEvent;
 import com.tranbac.chiptripbe.module.notification.event.NewSupportMessageEvent;
+import com.tranbac.chiptripbe.module.notification.event.PostTripEvent;
 import com.tranbac.chiptripbe.module.notification.event.SupportReplyEvent;
+import com.tranbac.chiptripbe.module.notification.event.TripCommentedEvent;
+import com.tranbac.chiptripbe.module.notification.event.TripLikedEvent;
 import com.tranbac.chiptripbe.module.notification.event.TripMemberAddedEvent;
+import com.tranbac.chiptripbe.module.notification.event.TripMemberJoinedEvent;
 import com.tranbac.chiptripbe.module.notification.event.TripReminderEvent;
 import com.tranbac.chiptripbe.module.notification.event.WeatherAlertEvent;
 import com.tranbac.chiptripbe.module.notification.repository.NotificationRepository;
@@ -60,6 +64,18 @@ public class NotificationEventListener {
         push(e.recipientUserId(), n);
     }
 
+    /** Có người tự tham gia qua link mời → noti cho owner (tái dùng type TRIP_MEMBER_ADDED). */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void onTripMemberJoined(TripMemberJoinedEvent e) {
+        String title = "Thành viên mới tham gia";
+        String body = String.format("%s đã tham gia '%s' qua link mời",
+                e.joinerName() != null ? e.joinerName() : "Ai đó", e.tripTitle());
+        Notification n = notificationService.create(
+                e.recipientUserId(), NotificationType.TRIP_MEMBER_ADDED, title, body, e.tripId());
+        push(e.recipientUserId(), n);
+    }
+
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void onAiCreditsLow(AiCreditsLowEvent e) {
@@ -102,6 +118,39 @@ public class NotificationEventListener {
         }
     }
 
+    /**
+     * Trip được thả tim → noti cho chủ trip.
+     * Dedup: còn noti TRIP_LIKED chưa đọc cho trip này thì bỏ qua (tránh spam khi toggle liên tục).
+     */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void onTripLiked(TripLikedEvent e) {
+        boolean alreadyPending = notificationRepository
+                .existsByRecipientIdAndTypeAndRefIdAndIsReadFalse(
+                        e.recipientUserId(), NotificationType.TRIP_LIKED, e.tripId());
+        if (alreadyPending) return;
+        String title = "Lịch trình của bạn được thả tim";
+        String body = String.format("%s đã thích '%s'",
+                e.likerName() != null ? e.likerName() : "Ai đó", e.tripTitle());
+        Notification n = notificationService.create(
+                e.recipientUserId(), NotificationType.TRIP_LIKED, title, body, e.tripId());
+        push(e.recipientUserId(), n);
+    }
+
+    /** Trip có comment mới → noti cho chủ trip; reply → noti cho tác giả comment cha. */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void onTripCommented(TripCommentedEvent e) {
+        String commenter = e.commenterName() != null ? e.commenterName() : "Ai đó";
+        String title = e.reply()
+                ? commenter + " đã trả lời bình luận của bạn"
+                : commenter + " đã bình luận lịch trình của bạn";
+        String body = String.format("'%s': %s", e.tripTitle(), e.previewBody());
+        Notification n = notificationService.create(
+                e.recipientUserId(), NotificationType.TRIP_COMMENTED, title, body, e.tripId());
+        push(e.recipientUserId(), n);
+    }
+
     /** Scheduler tạo event ngoài transaction nghiệp vụ → dùng EventListener thường. */
     @EventListener
     public void onTripReminder(TripReminderEvent e) {
@@ -109,6 +158,17 @@ public class NotificationEventListener {
         String body = String.format("'%s' khởi hành ngày mai (%s).", e.tripTitle(), e.dateStart());
         Notification n = notificationService.create(
                 e.recipientUserId(), NotificationType.TRIP_REMINDER, title, body, e.tripId());
+        push(e.recipientUserId(), n);
+    }
+
+    /** Scheduler tạo event ngoài transaction → EventListener thường. Owner nhấp vào sẽ tới trip của họ. */
+    @EventListener
+    public void onPostTrip(PostTripEvent e) {
+        String title = "Chuyến đi thế nào? 🎒";
+        String body = String.format("Đánh giá các địa điểm trong '%s' và chia sẻ lịch trình cho cộng đồng nhé!",
+                e.tripTitle());
+        Notification n = notificationService.create(
+                e.recipientUserId(), NotificationType.POST_TRIP_REVIEW, title, body, e.tripId());
         push(e.recipientUserId(), n);
     }
 

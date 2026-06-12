@@ -46,8 +46,8 @@ class AiGenerateServiceImpl implements AiService {
     }
 
     @Override
-    public AiCallResult generateItinerary(GenerateTripRequest request) {
-        Map<String, Object> requestBody = buildRequest(request);
+    public AiCallResult generateItinerary(GenerateTripRequest request, String userPreferences) {
+        Map<String, Object> requestBody = buildRequest(request, userPreferences);
 
         for (int attempt = 0; attempt <= aiProperties.getMaxRetries(); attempt++) {
             try {
@@ -94,7 +94,7 @@ class AiGenerateServiceImpl implements AiService {
 
     // ─── Build request (OpenAI Chat Completions format) ───────────────────────
 
-    private Map<String, Object> buildRequest(GenerateTripRequest request) {
+    private Map<String, Object> buildRequest(GenerateTripRequest request, String userPreferences) {
         String systemPrompt = """
                 Bạn là chuyên gia du lịch Việt Nam.
                 Quy tắc bắt buộc:
@@ -188,6 +188,17 @@ class AiGenerateServiceImpl implements AiService {
                 numDays
         );
 
+        // Cá nhân hóa theo gu du lịch đã lưu trong hồ sơ (User.preferences) —
+        // chỉ là tín hiệu ưu tiên, KHÔNG ghi đè "Phong cách" user chọn cho chuyến này
+        String preferencesText = formatPreferences(userPreferences);
+        if (preferencesText != null) {
+            userPrompt += String.format("""
+
+                    Gu du lịch đã lưu trong hồ sơ của khách (ưu tiên cá nhân hóa hoạt động theo gu này
+                    khi không mâu thuẫn với Phong cách ở trên): %s
+                    """, preferencesText);
+        }
+
         return Map.of(
                 "model", aiProperties.getOpenaiCompat().getModel(),
                 "messages", List.of(
@@ -197,6 +208,26 @@ class AiGenerateServiceImpl implements AiService {
                 "response_format", Map.of("type", "json_object"),
                 "temperature", 0.7
         );
+    }
+
+    /**
+     * Đổi tag preferences ("healing,food,photo,adventure" — lưu từ Profile FE)
+     * thành mô tả tiếng Việt cho prompt. Tag lạ giữ nguyên. Trả null nếu trống.
+     */
+    private String formatPreferences(String userPreferences) {
+        if (userPreferences == null || userPreferences.isBlank()) return null;
+        Map<String, String> labels = Map.of(
+                "healing", "chữa lành, thư giãn nhẹ nhàng",
+                "food", "ẩm thực, ăn uống đặc sản",
+                "photo", "sống ảo, địa điểm chụp ảnh đẹp",
+                "adventure", "mạo hiểm, trải nghiệm cảm giác mạnh"
+        );
+        String text = java.util.Arrays.stream(userPreferences.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(tag -> labels.getOrDefault(tag, tag))
+                .collect(java.util.stream.Collectors.joining("; "));
+        return text.isEmpty() ? null : text;
     }
 
     // ─── HTTP call ────────────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ public interface AiUsageRepository extends JpaRepository<AiUsage, Long>, JpaSpec
 
     @Query("SELECT COALESCE(SUM(a.costUsd), 0), COUNT(a) " +
            "FROM AiUsage a WHERE a.createdAt >= :from AND a.createdAt <= :to")
-    Object[] aggregateForPeriod(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
+    List<Object[]> aggregateForPeriod(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
     /** Set trip_id = NULL để tránh FK constraint khi xóa trip */
     @Modifying

@@ -336,6 +336,24 @@ class AuthServiceImpl implements AuthService {
 
         User user = userRepository
                 .findByOauthProviderAndOauthProviderId(OAuthProvider.GOOGLE, googleUser.sub())
+                .or(() -> userRepository.findByEmail(googleUser.email())
+                        .map(existingUser -> {
+                            if (existingUser.getOauthProvider() != null
+                                    && (!OAuthProvider.GOOGLE.equals(existingUser.getOauthProvider())
+                                    || (existingUser.getOauthProviderId() != null
+                                    && !existingUser.getOauthProviderId().equals(googleUser.sub())))) {
+                                throw AppException.conflict("Email da duoc lien ket voi tai khoan OAuth khac");
+                            }
+                            log.info("Linking existing user to Google OAuth: userId={}", existingUser.getId());
+                            existingUser.setOauthProvider(OAuthProvider.GOOGLE);
+                            existingUser.setOauthProviderId(googleUser.sub());
+                            existingUser.setEmailVerified(true);
+                            if ((existingUser.getAvatarUrl() == null || existingUser.getAvatarUrl().isBlank())
+                                    && googleUser.picture() != null && !googleUser.picture().isBlank()) {
+                                existingUser.setAvatarUrl(googleUser.picture());
+                            }
+                            return userRepository.save(existingUser);
+                        }))
                 .orElseGet(() -> {
                     log.info("Creating new user via Google OAuth: email={}", googleUser.email());
 
@@ -344,7 +362,7 @@ class AuthServiceImpl implements AuthService {
 
                     User newUser = User.builder()
                             .email(googleUser.email())
-                            .passwordHash(null)
+                            .passwordHash(generateDisabledPasswordHash())
                             .fullName(googleUser.name() != null ? googleUser.name() : "User")
                             .avatarUrl(googleUser.picture() != null ? googleUser.picture() : null)
                             .role(userRole)
@@ -433,6 +451,10 @@ class AuthServiceImpl implements AuthService {
                 .fullName(user.getFullName())
                 .role(user.getRole().getName())
                 .build();
+    }
+
+    private String generateDisabledPasswordHash() {
+        return passwordEncoder.encode(UUID.randomUUID().toString());
     }
 
     private String hash(String raw) {

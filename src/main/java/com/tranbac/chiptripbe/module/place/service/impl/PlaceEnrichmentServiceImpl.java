@@ -147,21 +147,35 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             if (hotelOpt.isEmpty()) return;
             SerpApiClient.HotelData h = hotelOpt.get();
 
+            // Search chỉ cho link Google Travel generic + rate tổng hợp. Gọi thêm Property Details
+            // để lấy deep-link nhà cung cấp thật (ưu tiên Trip.com) + giá/đêm chính xác. Best-effort.
+            String bookingLink = h.bookingLink();
+            Long pricePerNight = h.pricePerNightVnd();
+            if (h.propertyToken() != null && !h.propertyToken().isBlank()) {
+                Optional<SerpApiClient.HotelBooking> detailsOpt =
+                        serpApiClient.fetchHotelDetails(h.propertyToken(), checkIn, checkOut, adults);
+                if (detailsOpt.isPresent()) {
+                    SerpApiClient.HotelBooking d = detailsOpt.get();
+                    if (d.bookingLink() != null && !d.bookingLink().isBlank()) bookingLink = d.bookingLink();
+                    if (d.pricePerNightVnd() != null) pricePerNight = d.pricePerNightVnd();
+                }
+            }
+
             boolean changed = false;
-            if (h.bookingLink() != null && !h.bookingLink().isBlank()
-                    && !h.bookingLink().equals(cache.getBookingUrl())) {
-                cache.setBookingUrl(h.bookingLink());
+            if (bookingLink != null && !bookingLink.isBlank()
+                    && !bookingLink.equals(cache.getBookingUrl())) {
+                cache.setBookingUrl(bookingLink);
                 changed = true;
             }
-            if (h.pricePerNightVnd() != null && !h.pricePerNightVnd().equals(cache.getPricePerNightVnd())) {
-                cache.setPricePerNightVnd(h.pricePerNightVnd());
+            if (pricePerNight != null && !pricePerNight.equals(cache.getPricePerNightVnd())) {
+                cache.setPricePerNightVnd(pricePerNight);
                 changed = true;
             }
             if (h.rating() != null && !h.rating().equals(cache.getRating())) {
                 cache.setRating(h.rating());
                 changed = true;
             }
-            
+
             if (h.propertyToken() != null && !h.propertyToken().isBlank()) {
                 List<Map<String, String>> photos = serpApiClient.fetchHotelPhotos(h.propertyToken());
                 if (photos != null && !photos.isEmpty()) {

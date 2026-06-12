@@ -4,6 +4,8 @@ import com.tranbac.chiptripbe.common.response.ApiResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.AiCostByProviderMonthResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DailyCountResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DashboardResponse;
+import com.tranbac.chiptripbe.module.stats.dto.response.EventCountResponse;
+import com.tranbac.chiptripbe.module.stats.service.AnalyticsService;
 import com.tranbac.chiptripbe.module.stats.service.StatsService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -28,6 +30,7 @@ import java.util.List;
 public class AdminStatsController {
 
     private final StatsService statsService;
+    private final AnalyticsService analyticsService;
 
     @Operation(summary = "Tổng quan: tổng user, tổng trip, chi phí AI tháng này")
     @SecurityRequirement(name = "bearerAuth")
@@ -61,5 +64,29 @@ public class AdminStatsController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
         return ResponseEntity.ok(ApiResponse.ok(statsService.getAiCostByProviderMonth(from, to)));
+    }
+
+    @Operation(summary = "PostHog: lượt xem trang ($pageview) theo ngày, N ngày gần nhất")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/analytics/pageviews")
+    public ResponseEntity<ApiResponse<List<DailyCountResponse>>> getPageviews(
+            @RequestParam(defaultValue = "14") int days) {
+        return ResponseEntity.ok(ApiResponse.ok(analyticsService.getPageviewsByDay(days)));
+    }
+
+    @Operation(summary = "PostHog: số lần phát sinh mỗi event, N ngày gần nhất")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/analytics/events")
+    public ResponseEntity<ApiResponse<List<EventCountResponse>>> getEventCounts(
+            @RequestParam(defaultValue = "30") int days) {
+        return ResponseEntity.ok(ApiResponse.ok(analyticsService.getEventCounts(days)));
+    }
+
+    @Operation(summary = "PostHog: funnel chuyển đổi (số người dùng đạt mỗi bước), N ngày gần nhất")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/analytics/funnel")
+    public ResponseEntity<ApiResponse<List<EventCountResponse>>> getFunnel(
+            @RequestParam(defaultValue = "30") int days) {
+        return ResponseEntity.ok(ApiResponse.ok(analyticsService.getFunnel(days)));
     }
 }

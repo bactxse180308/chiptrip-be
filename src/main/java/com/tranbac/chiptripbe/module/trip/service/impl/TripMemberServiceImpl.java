@@ -3,8 +3,10 @@ package com.tranbac.chiptripbe.module.trip.service.impl;
 import com.tranbac.chiptripbe.common.enums.TripMemberRole;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.notification.event.TripMemberAddedEvent;
+import com.tranbac.chiptripbe.module.notification.event.TripMemberJoinedEvent;
 import com.tranbac.chiptripbe.module.trip.dto.request.AddMemberRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateMemberRequest;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripInvitePreviewResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripMemberResponse;
 import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.entity.TripMember;
@@ -19,7 +21,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -125,6 +129,72 @@ class TripMemberServiceImpl implements TripMemberService {
                     .role(TripMemberRole.OWNER)
                     .build());
         }
+    }
+
+    @Override
+    @Transactional
+    public String createInvite(Long ownerId, Long tripId) {
+        Trip trip = findTripByOwner(tripId, ownerId);
+        if (trip.getInviteToken() == null) {
+            trip.setInviteToken(UUID.randomUUID().toString().replace("-", ""));
+            tripRepository.save(trip);
+        }
+        return trip.getInviteToken();
+    }
+
+    @Override
+    @Transactional
+    public void revokeInvite(Long ownerId, Long tripId) {
+        Trip trip = findTripByOwner(tripId, ownerId);
+        trip.setInviteToken(null);
+        tripRepository.save(trip);
+    }
+
+    @Override
+    public TripInvitePreviewResponse getInvitePreview(String inviteToken) {
+        Trip trip = findTripByInviteToken(inviteToken);
+        long numDays = ChronoUnit.DAYS.between(trip.getDateStart(), trip.getDateEnd()) + 1;
+        return TripInvitePreviewResponse.builder()
+                .tripId(trip.getId())
+                .title(trip.getTitle())
+                .destination(trip.getDestination())
+                .ownerName(trip.getUser().getFullName())
+                .ownerAvatarUrl(trip.getUser().getAvatarUrl())
+                .memberCount(tripMemberRepository.countByTripId(trip.getId()))
+                .numDays(numDays)
+                .build();
+    }
+
+    @Override
+    @Transactional
+    public TripMemberResponse joinByInvite(Long userId, String inviteToken) {
+        Trip trip = findTripByInviteToken(inviteToken);
+        if (tripMemberRepository.existsByTripIdAndUserId(trip.getId(), userId)) {
+            throw new AppException(HttpStatus.CONFLICT, "ALREADY_A_MEMBER", "Bạn đã là thành viên chuyến đi này", null);
+        }
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
+
+        TripMember member = tripMemberRepository.save(TripMember.builder()
+                .trip(trip)
+                .user(user)
+                .displayName(user.getFullName())
+                .role(TripMemberRole.MEMBER)
+                .build());
+
+        // Noti cho owner biết có người vừa tham gia qua link
+        eventPublisher.publishEvent(new TripMemberJoinedEvent(
+                trip.getUser().getId(),
+                trip.getId(),
+                trip.getTitle(),
+                user.getFullName()
+        ));
+        return toResponse(member);
+    }
+
+    private Trip findTripByInviteToken(String inviteToken) {
+        return tripRepository.findByInviteToken(inviteToken)
+                .orElseThrow(() -> AppException.notFound("Link mời không hợp lệ hoặc đã bị thu hồi"));
     }
 
     private Trip findTripByOwner(Long tripId, Long ownerId) {

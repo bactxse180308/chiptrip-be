@@ -13,6 +13,4 @@ public class GoongProperties {
     private String apiKey;
     private String baseUrl = "https://rsapi.goong.io";
     private int timeoutSeconds = 5;
-    /** Bật endpoint /v2/geocode + has_vnid=true để lấy thêm compound (province/commune). */
-    private boolean geocodeV2 = true;
 }

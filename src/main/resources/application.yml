@@ -56,8 +56,8 @@ app:
       - http://localhost:3000
       - http://localhost:5173
   google:
-    client-id: ${GOOGLE_CLIENT_ID:}
-    client-secret: ${GOOGLE_CLIENT_SECRET:}
+    client-id: ${GOOGLE_CLIENT_ID}
+    client-secret: ${GOOGLE_CLIENT_SECRET}
   ai:
     openai-compat:
       api-key: ${AI_API_KEY}
@@ -72,7 +72,6 @@ app:
     api-key: ${GOONG_API_KEY}
     base-url: https://rsapi.goong.io
     timeout-seconds: 5
-    geocode-v2: true
   serpapi:
     api-key: ${SERPAPI_API_KEY:}
     base-url: https://serpapi.com
@@ -80,6 +79,11 @@ app:
     enabled: true
     cache-ttl-days: 30
     retry-backoff-minutes: 360
+  posthog:
+    api-host: ${POSTHOG_API_HOST:https://us.posthog.com}
+    project-id: ${POSTHOG_PROJECT_ID:}
+    personal-key: ${POSTHOG_PERSONAL_KEY:}
+    timeout-seconds: 10
   external:
     openweather-api-key: ${OPENWEATHER_API_KEY:}
   r2:
@@ -91,15 +95,17 @@ app:
   chat:
     image-max-bytes: 5242880
   rate-limit:
-    login-limit: 5
+    # DEV: nới lỏng để dễ test — lên production nhớ hạ về (login 5/15p, register 3/60p,
+    # forgot 3/60p, generate 5/1p, default 60/1p)
+    login-limit: 100
     login-window-minutes: 15
-    register-limit: 3
+    register-limit: 50
     register-window-minutes: 60
-    forgot-password-limit: 3
+    forgot-password-limit: 50
     forgot-password-window-minutes: 60
-    generate-limit: 5
+    generate-limit: 10
     generate-window-minutes: 1
-    default-limit: 60
+    default-limit: 300
     default-window-minutes: 1
 
 springdoc:

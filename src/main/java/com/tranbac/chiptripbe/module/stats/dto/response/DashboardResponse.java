@@ -9,6 +9,12 @@ import java.math.BigDecimal;
 public class DashboardResponse {
     private long totalUsers;
     private long totalTrips;
+    private long publishedTrips;
+    private long totalLikes;
+    private long totalComments;
+    private long totalReviews;
+    private long totalOrders;
+    private BigDecimal revenueVndThisMonth;
     private long aiCallsThisMonth;
     private BigDecimal aiCostUsdThisMonth;
 }
