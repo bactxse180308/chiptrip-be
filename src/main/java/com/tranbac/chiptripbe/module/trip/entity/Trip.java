@@ -6,6 +6,7 @@ import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.Nationalized;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -13,7 +14,9 @@ import java.util.List;
 @Table(name = "trips",
         indexes = {
                 @Index(name = "ix_trips_user", columnList = "user_id"),
-                @Index(name = "ix_trips_share_token", columnList = "share_token", unique = true)
+                @Index(name = "ix_trips_share_token", columnList = "share_token", unique = true),
+                @Index(name = "ix_trips_invite_token", columnList = "invite_token", unique = true),
+                @Index(name = "ix_trips_public_published", columnList = "is_public, published_at")
         })
 @Getter
 @Setter
@@ -56,6 +59,29 @@ public class Trip extends BaseAuditEntity {
 
     @Column(name = "share_token", length = 64)
     private String shareToken;
+
+    /** Token link mời thành viên — pattern như shareToken; null = chưa bật/đã thu hồi. */
+    @Column(name = "invite_token", length = 64)
+    private String inviteToken;
+
+    /** Trip công khai hiển thị ở feed Khám phá. */
+    @Column(name = "is_public", columnDefinition = "bit NOT NULL DEFAULT 0")
+    @Builder.Default
+    private boolean isPublic = false;
+
+    /** Lần đầu publish — giữ nguyên khi unpublish/republish để feed ổn định thứ tự. */
+    @Column(name = "published_at", columnDefinition = "DATETIME2")
+    private LocalDateTime publishedAt;
+
+    /** Denormalized counter — sync từ trip_likes qua TripRepository.updateLikesCount. */
+    @Column(name = "likes_count", columnDefinition = "INT NOT NULL DEFAULT 0")
+    @Builder.Default
+    private Integer likesCount = 0;
+
+    /** Denormalized counter — sync từ trip_comments qua TripRepository.updateCommentsCount. */
+    @Column(name = "comments_count", columnDefinition = "INT NOT NULL DEFAULT 0")
+    @Builder.Default
+    private Integer commentsCount = 0;
 
     @OneToMany(mappedBy = "trip", cascade = CascadeType.ALL,
             orphanRemoval = true, fetch = FetchType.LAZY)

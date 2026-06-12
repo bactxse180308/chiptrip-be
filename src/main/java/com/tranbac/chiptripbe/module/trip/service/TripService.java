@@ -30,4 +30,7 @@ public interface TripService {
     void disableShare(Long userId, Long tripId);
 
     TripDetailResponse getSharedTrip(String shareToken);
+
+    /** Xem trip public (feed Khám phá) — trả 404 nếu trip không tồn tại hoặc is_public=false. */
+    TripDetailResponse getPublicTrip(Long tripId);
 }

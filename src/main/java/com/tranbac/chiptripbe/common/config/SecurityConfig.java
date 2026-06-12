@@ -68,6 +68,14 @@ public class SecurityConfig {
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(PUBLIC_PATHS).permitAll()
+                        // Social/review: chỉ GET là public — POST/DELETE cùng path vẫn cần JWT
+                        .requestMatchers(org.springframework.http.HttpMethod.GET,
+                                "/api/v1/trips/public/feed",
+                                "/api/v1/trips/*/public",
+                                "/api/v1/trips/*/comments",
+                                "/api/v1/trips/invite/*",
+                                "/api/v1/places/*/reviews",
+                                "/api/v1/places/*/reviews/summary").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )

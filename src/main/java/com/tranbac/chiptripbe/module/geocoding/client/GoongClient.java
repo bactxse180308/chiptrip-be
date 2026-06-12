@@ -16,7 +16,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Client gọi Goong API: forward geocode và place autocomplete.
+ * Client gọi Goong API v2.
  * API key đọc từ app.goong.api-key — không hardcode.
  */
 @Slf4j
@@ -59,23 +59,19 @@ public class GoongClient {
     private final ConcurrentHashMap<String, DirectionResult> directionCache = new ConcurrentHashMap<>();
 
     /**
-     * Đổi địa chỉ/tên địa điểm thành tọa độ.
-     * Mặc định dùng V2 (/v2/geocode + has_vnid=true) để có thêm compound (province/commune).
-     * Khi geocodeV2=false rơi về V1 (/geocode), khi đó province/commune sẽ null.
+     * Đổi địa chỉ/tên địa điểm thành tọa độ qua V2 (/v2/geocode + has_vnid=true).
      * Trả Optional.empty() nếu không tìm thấy hoặc API fail.
      */
     @SuppressWarnings("unchecked")
     public Optional<GeocodeResult> forwardGeocode(String query) {
         if (query == null || query.isBlank()) return Optional.empty();
-        boolean useV2 = properties.isGeocodeV2();
-        String path = useV2 ? "/v2/geocode" : "/geocode";
         try {
             Map<String, Object> resp = client.get()
-                    .uri(b -> {
-                        var builder = b.path(path).queryParam("address", query);
-                        if (useV2) builder.queryParam("has_vnid", "true");
-                        return builder.queryParam("api_key", properties.getApiKey()).build();
-                    })
+                    .uri(b -> b.path("/v2/geocode")
+                            .queryParam("address", query)
+                            .queryParam("has_vnid", "true")
+                            .queryParam("api_key", properties.getApiKey())
+                            .build())
                     .retrieve()
                     .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                     .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
@@ -111,7 +107,7 @@ public class GoongClient {
         if (placeId == null || placeId.isBlank()) return Optional.empty();
         try {
             Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/Place/Detail")
+                    .uri(b -> b.path("/v2/place/detail")
                             .queryParam("place_id", placeId)
                             .queryParam("api_key", properties.getApiKey())
                             .build())
@@ -141,7 +137,7 @@ public class GoongClient {
         if (input == null || input.isBlank()) return List.of();
         try {
             Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/Place/AutoComplete")
+                    .uri(b -> b.path("/v2/place/autocomplete")
                             .queryParam("input", input)
                             .queryParam("api_key", properties.getApiKey())
                             .build())
@@ -183,7 +179,7 @@ public class GoongClient {
 
         try {
             Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/Direction")
+                    .uri(b -> b.path("/v2/direction")
                             .queryParam("origin", oLat + "," + oLng)
                             .queryParam("destination", dLat + "," + dLng)
                             .queryParam("vehicle", v)
@@ -235,7 +231,7 @@ public class GoongClient {
 
         try {
             Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/DistanceMatrix")
+                    .uri(b -> b.path("/v2/distancematrix")
                             .queryParam("origins", originsStr)
                             .queryParam("destinations", destsStr)
                             .queryParam("vehicle", v)
@@ -277,7 +273,7 @@ public class GoongClient {
     public Optional<String> reverseGeocodeProvince(double lat, double lng) {
         try {
             Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/Geocode")
+                    .uri(b -> b.path("/v2/geocode")
                             .queryParam("latlng", lat + "," + lng)
                             .queryParam("api_key", properties.getApiKey())
                             .build())

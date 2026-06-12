@@ -28,6 +28,12 @@ public class TripDetailResponse {
     private LocalDateTime updatedAt;
     private Long totalCostVnd;
     private String shareToken;
+    private Boolean isPublic;
+    private LocalDateTime publishedAt;
+    private Integer likesCount;
+    private Integer commentsCount;
+    /** UPCOMING / ONGOING / COMPLETED — derived từ dateStart/dateEnd. */
+    private String status;
 
     private UserInfo user;
     private List<TripMemberResponse> members;
@@ -40,6 +46,7 @@ public class TripDetailResponse {
         private Long id;
         private String email;
         private String fullName;
+        private String avatarUrl;
     }
 
     @Getter

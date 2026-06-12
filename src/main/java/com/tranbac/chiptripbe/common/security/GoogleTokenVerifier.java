@@ -24,7 +24,7 @@ public class GoogleTokenVerifier {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public record GoogleUserInfo(String sub, String email, String name, String picture) {}
+    public record GoogleUserInfo(String sub, String email, String name, String picture, boolean emailVerified) {}
 
     public GoogleUserInfo verify(String idToken) throws Exception {
         if (idToken == null || idToken.isBlank()) {
@@ -54,8 +54,13 @@ public class GoogleTokenVerifier {
             String name = root.has("name") ? root.get("name").asText() : "";
             String picture = root.has("picture") ? root.get("picture").asText() : "";
             String sub = root.has("sub") ? root.get("sub").asText() : "";
+            boolean emailVerified = root.has("email_verified") && root.get("email_verified").asBoolean(false);
 
-            return new GoogleUserInfo(sub, email, name, picture);
+            if (sub.isBlank() || email.isBlank() || !emailVerified) {
+                throw new SecurityException("Google account information is incomplete or email is not verified");
+            }
+
+            return new GoogleUserInfo(sub, email, name, picture, emailVerified);
         }
     }
 }

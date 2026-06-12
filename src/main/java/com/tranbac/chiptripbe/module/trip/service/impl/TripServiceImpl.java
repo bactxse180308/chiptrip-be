@@ -3,6 +3,7 @@ package com.tranbac.chiptripbe.module.trip.service.impl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.enums.ActivityType;
+import com.tranbac.chiptripbe.common.enums.TripLifecycleStatus;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
@@ -25,7 +26,9 @@ import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.entity.TripDay;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ChecklistItemRepository;
+import com.tranbac.chiptripbe.module.trip.repository.TripCommentRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripDayRepository;
+import com.tranbac.chiptripbe.module.trip.repository.TripLikeRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripMemberRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.trip.service.TripGenerationPersistenceService;
@@ -35,6 +38,7 @@ import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -43,6 +47,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -55,6 +63,8 @@ class TripServiceImpl implements TripService {
     private final ActivityRepository activityRepository;
     private final ChecklistItemRepository checklistItemRepository;
     private final TripMemberRepository tripMemberRepository;
+    private final TripLikeRepository tripLikeRepository;
+    private final TripCommentRepository tripCommentRepository;
     private final TripMemberService tripMemberService;
     private final UserRepository userRepository;
     private final AiService aiService;
@@ -63,6 +73,8 @@ class TripServiceImpl implements TripService {
     private final PlaceEnrichmentService placeEnrichmentService;
     private final PlaceCacheRepository placeCacheRepository;
     private final TripGenerationPersistenceService tripGenerationPersistenceService;
+    @Qualifier("enrichmentExecutor")
+    private final Executor enrichmentExecutor;
 
     /**
      * Orchestration only — KHÔNG annotate @Transactional.
@@ -81,9 +93,9 @@ class TripServiceImpl implements TripService {
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public TripGenerateResponse generateTrip(Long userId, GenerateTripRequest request) {
-        validateRequestAndCredits(userId, request);
+        String userPreferences = validateRequestAndCredits(userId, request);
 
-        AiCallResult aiCallResult = aiService.generateItinerary(request);
+        AiCallResult aiCallResult = aiService.generateItinerary(request, userPreferences);
 
         Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces =
                 resolvePlaces(aiCallResult.itinerary(), request);
@@ -92,7 +104,8 @@ class TripServiceImpl implements TripService {
                 userId, request, aiCallResult, resolvedPlaces);
     }
 
-    private void validateRequestAndCredits(Long userId, GenerateTripRequest request) {
+    /** @return User.preferences (gu du lịch đã lưu) để cá nhân hóa prompt AI — null nếu chưa có. */
+    private String validateRequestAndCredits(Long userId, GenerateTripRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
 
@@ -107,55 +120,70 @@ class TripServiceImpl implements TripService {
         if (request.getEndDate().isBefore(request.getStartDate())) {
             throw AppException.badRequest("Ngày kết thúc không được trước ngày bắt đầu");
         }
+        return user.getPreferences();
     }
 
     /**
-     * Resolve place cho mỗi activity cần geocode. Identity-keyed map để persist service
-     * dò ngược lại theo reference (AiActivity instance) — đơn giản hơn lưu index.
-     *
+     * Thu thập tất cả geocodable activities từ itinerary rồi resolve song song.
      * Fail-soft: 1 activity resolve fail không làm fail toàn bộ generate trip.
-     * Trip vẫn được tạo, activity chỉ thiếu location/enrichment.
      */
     private Map<AiItineraryResult.AiActivity, PlaceCache> resolvePlaces(
             AiItineraryResult itinerary, GenerateTripRequest request) {
-        Map<AiItineraryResult.AiActivity, PlaceCache> resolved = new IdentityHashMap<>();
-        if (itinerary.getDays() == null) return resolved;
+        if (itinerary.getDays() == null) return new ConcurrentHashMap<>();
 
-        String destination = request.getDestination();
+        List<AiItineraryResult.AiActivity> geocodable = new ArrayList<>();
         for (AiItineraryResult.AiDay day : itinerary.getDays()) {
             if (day.getActivities() == null) continue;
-            LocalDate dayDate = parseDayDate(day, request);
             for (AiItineraryResult.AiActivity act : day.getActivities()) {
                 ActivityType type = parseActivityType(act.getType());
                 if (!shouldGeocode(type)) continue;
                 if (act.getSearchQuery() == null || act.getSearchQuery().isBlank()) continue;
-
-                try {
-                    Optional<PlaceCache> placeOpt = placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination);
-                    placeOpt.ifPresent(place -> {
-                        resolved.put(act, place);
-                        if (type == ActivityType.ACCOMMODATION && dayDate != null) {
-                            placeEnrichmentService.enrichAccommodation(place, dayDate, dayDate.plusDays(1), request.getPeopleCount());
-                        }
-                    });
-                } catch (Exception e) {
-                    log.warn("Resolve place failed (skip): activity='{}', searchQuery='{}', error={}",
-                            act.getName(), act.getSearchQuery(), e.getMessage());
-                }
+                geocodable.add(act);
             }
         }
-        return resolved;
+
+        return resolveAllPlacesParallel(
+                geocodable,
+                request.getDestination(),
+                request.getStartDate(),
+                request.getEndDate(),
+                request.getPeopleCount());
     }
 
-    /** Lấy date của day: ưu tiên field AI sinh, fallback request.startDate + dayNumber. */
-    private LocalDate parseDayDate(AiItineraryResult.AiDay day, GenerateTripRequest request) {
-        if (day.getDate() != null && !day.getDate().isBlank()) {
-            try { return LocalDate.parse(day.getDate()); } catch (Exception ignored) {}
-        }
-        if (day.getDayNumber() != null && request.getStartDate() != null) {
-            return request.getStartDate().plusDays(day.getDayNumber() - 1);
-        }
-        return null;
+    private Map<AiItineraryResult.AiActivity, PlaceCache> resolveAllPlacesParallel(
+            List<AiItineraryResult.AiActivity> activities,
+            String destination,
+            LocalDate checkIn,
+            LocalDate checkOut,
+            Integer adults) {
+        Map<AiItineraryResult.AiActivity, PlaceCache> result = new ConcurrentHashMap<>();
+
+        List<CompletableFuture<Void>> futures = activities.stream()
+                .map(act -> CompletableFuture.runAsync(() -> {
+                    try {
+                        Optional<PlaceCache> placeOpt = placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination);
+                        placeOpt.ifPresent(cache -> {
+                            result.put(act, cache);
+                            if (parseActivityType(act.getType()) == ActivityType.ACCOMMODATION) {
+                                placeEnrichmentService.enrichAccommodation(cache, checkIn, checkOut, adults);
+                            }
+                        });
+                    } catch (Exception e) {
+                        log.warn("Resolve place failed (skip): activity='{}', searchQuery='{}', error={}",
+                                act.getName(), act.getSearchQuery(), e.getMessage());
+                    }
+                }, enrichmentExecutor))
+                .toList();
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .orTimeout(60, TimeUnit.SECONDS)
+                .exceptionally(ex -> {
+                    log.warn("Parallel enrichment timeout/error: {}", ex.getMessage());
+                    return null;
+                })
+                .join();
+
+        return result;
     }
 
     @Override
@@ -220,6 +248,9 @@ class TripServiceImpl implements TripService {
     public void deleteTrip(Long userId, Long tripId) {
         Trip trip = findTripByIdAndUserId(tripId, userId);
         aiUsageRepository.nullifyTripReference(tripId);
+        // likes/comments dùng cột tripId Long thuần (không FK cascade) — phải cleanup tay
+        tripLikeRepository.deleteByTripId(tripId);
+        tripCommentRepository.deleteByTripId(tripId);
         tripRepository.delete(trip);
         log.info("Deleted trip id={} by userId={}", tripId, userId);
     }
@@ -314,6 +345,15 @@ class TripServiceImpl implements TripService {
         return buildTripDetailResponse(trip);
     }
 
+    @Override
+    @Transactional(readOnly = true)
+    public TripDetailResponse getPublicTrip(Long tripId) {
+        Trip trip = tripRepository.findById(tripId)
+                .filter(Trip::isPublic)
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy chuyến đi"));
+        return buildTripDetailResponse(trip);
+    }
+
     // ─── Private helpers ─────────────────────────────────────────────────────
 
     private Trip findTripByIdAndUserId(Long tripId, Long userId) {
@@ -387,10 +427,16 @@ class TripServiceImpl implements TripService {
                 .updatedAt(trip.getUpdatedAt())
                 .totalCostVnd(dayDetails.stream().mapToLong(d -> d.getDayCostVnd() != null ? d.getDayCostVnd() : 0L).sum())
                 .shareToken(trip.getShareToken())
+                .isPublic(trip.isPublic())
+                .publishedAt(trip.getPublishedAt())
+                .likesCount(trip.getLikesCount())
+                .commentsCount(trip.getCommentsCount())
+                .status(TripLifecycleStatus.of(trip.getDateStart(), trip.getDateEnd(), LocalDate.now()).name())
                 .user(TripDetailResponse.UserInfo.builder()
                         .id(trip.getUser().getId())
                         .email(trip.getUser().getEmail())
                         .fullName(trip.getUser().getFullName())
+                        .avatarUrl(trip.getUser().getAvatarUrl())
                         .build())
                 .members(members)
                 .days(dayDetails)
@@ -415,6 +461,10 @@ class TripServiceImpl implements TripService {
                 .createdAt(trip.getCreatedAt())
                 .updatedAt(trip.getUpdatedAt())
                 .imageUrl(imageUrl)
+                .isPublic(trip.isPublic())
+                .likesCount(trip.getLikesCount())
+                .commentsCount(trip.getCommentsCount())
+                .status(TripLifecycleStatus.of(trip.getDateStart(), trip.getDateEnd(), LocalDate.now()).name())
                 .build();
     }
 

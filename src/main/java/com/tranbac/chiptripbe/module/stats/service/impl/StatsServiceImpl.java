@@ -1,10 +1,13 @@
 package com.tranbac.chiptripbe.module.stats.service.impl;
 
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
+import com.tranbac.chiptripbe.module.place.repository.PlaceReviewRepository;
 import com.tranbac.chiptripbe.module.stats.dto.response.AiCostByProviderMonthResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DailyCountResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DashboardResponse;
 import com.tranbac.chiptripbe.module.stats.service.StatsService;
+import com.tranbac.chiptripbe.module.trip.repository.TripCommentRepository;
+import com.tranbac.chiptripbe.module.trip.repository.TripLikeRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -29,18 +32,25 @@ class StatsServiceImpl implements StatsService {
 
     private final UserRepository userRepository;
     private final TripRepository tripRepository;
+    private final TripLikeRepository tripLikeRepository;
+    private final TripCommentRepository tripCommentRepository;
+    private final PlaceReviewRepository placeReviewRepository;
     private final AiUsageRepository aiUsageRepository;
 
     @Override
     public DashboardResponse getDashboard() {
         long totalUsers = userRepository.count();
         long totalTrips = tripRepository.count();
+        long publishedTrips = tripRepository.countByIsPublicTrue();
+        long totalLikes = tripLikeRepository.count();
+        long totalComments = tripCommentRepository.count();
+        long totalReviews = placeReviewRepository.count();
 
         YearMonth currentMonth = YearMonth.now();
         LocalDateTime startOfMonth = currentMonth.atDay(1).atStartOfDay();
         LocalDateTime endOfMonth = currentMonth.atEndOfMonth().atTime(LocalTime.MAX);
 
-        Object[] aiStats = aiUsageRepository.aggregateForPeriod(startOfMonth, endOfMonth);
+        Object[] aiStats = aiUsageRepository.aggregateForPeriod(startOfMonth, endOfMonth).get(0);
         BigDecimal aiCost = new BigDecimal(aiStats[0].toString());
         long aiCalls = ((Number) aiStats[1]).longValue();
 
@@ -48,6 +58,12 @@ class StatsServiceImpl implements StatsService {
         return DashboardResponse.builder()
                 .totalUsers(totalUsers)
                 .totalTrips(totalTrips)
+                .publishedTrips(publishedTrips)
+                .totalLikes(totalLikes)
+                .totalComments(totalComments)
+                .totalReviews(totalReviews)
+                .totalOrders(0)
+                .revenueVndThisMonth(BigDecimal.ZERO)
                 .aiCallsThisMonth(aiCalls)
                 .aiCostUsdThisMonth(aiCost)
                 .build();

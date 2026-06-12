@@ -239,6 +239,88 @@ public class SerpApiClient {
         }
     }
 
+    /** Deep-link đặt phòng + giá/đêm (VNĐ) từ Google Hotels Property Details. */
+    public record HotelBooking(Long pricePerNightVnd, String bookingLink) {}
+
+    /**
+     * Google Hotels Property Details API (engine=google_hotels + property_token).
+     * Trả deep-link đặt phòng theo từng nguồn (ưu tiên Trip.com) + giá/đêm.
+     * Khác searchHotel(): search chỉ cho rate tổng hợp + link Google Travel generic;
+     * property details mới có featured_prices/prices kèm link nhà cung cấp thật.
+     * Fail-soft → Optional.empty().
+     */
+    @SuppressWarnings("unchecked")
+    public Optional<HotelBooking> fetchHotelDetails(String propertyToken, LocalDate checkIn, LocalDate checkOut, Integer adults) {
+        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) return Optional.empty();
+        if (propertyToken == null || propertyToken.isBlank()) return Optional.empty();
+        if (checkIn == null || checkOut == null || !checkOut.isAfter(checkIn)) return Optional.empty();
+
+        try {
+            log.info("SerpApi fetchHotelDetails (property details) propertyToken='{}' {}..{}", propertyToken, checkIn, checkOut);
+            // property_token thay thế q — không truyền q kèm property_token
+            Map<String, Object> resp = client.get()
+                    .uri(b -> b.path("/search")
+                            .queryParam("engine", "google_hotels")
+                            .queryParam("property_token", propertyToken)
+                            .queryParam("check_in_date", checkIn.format(HOTEL_DATE_FORMAT))
+                            .queryParam("check_out_date", checkOut.format(HOTEL_DATE_FORMAT))
+                            .queryParam("adults", adults != null ? adults.toString() : "2")
+                            .queryParam("currency", "VND")
+                            .queryParam("gl", "vn")
+                            .queryParam("hl", "vi")
+                            .queryParam("api_key", properties.getApiKey())
+                            .build())
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                    .block();
+
+            if (resp == null) return Optional.empty();
+
+            // featured_prices ưu tiên hơn prices
+            PriceLink best = pickBookingPrice(resp.get("featured_prices"));
+            if (best == null) best = pickBookingPrice(resp.get("prices"));
+
+            Long price = best != null ? best.price() : null;
+            String link = best != null ? best.link() : null;
+
+            // Fallback giá từ rate_per_night tổng nếu chưa có
+            if (price == null && resp.get("rate_per_night") instanceof Map<?, ?> rate
+                    && rate.get("extracted_lowest") instanceof Number n) {
+                price = n.longValue();
+            }
+
+            if (price == null && link == null) return Optional.empty();
+            return Optional.of(new HotelBooking(price, link));
+        } catch (Exception e) {
+            log.warn("SerpApi Google Hotels property details failed for token='{}': {}", propertyToken, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    private record PriceLink(Long price, String link) {}
+
+    /** Duyệt mảng price-source; ưu tiên Trip.com, nếu không có thì lấy nguồn đầu tiên có link. */
+    private PriceLink pickBookingPrice(Object pricesObj) {
+        if (!(pricesObj instanceof List<?> prices) || prices.isEmpty()) return null;
+        PriceLink first = null;
+        for (Object item : prices) {
+            if (!(item instanceof Map<?, ?> priceItem)) continue;
+            String source = stringOrNull(priceItem.get("source"));
+            String link = stringOrNull(priceItem.get("link"));
+            Long price = null;
+            if (priceItem.get("rate_per_night") instanceof Map<?, ?> rate
+                    && rate.get("extracted_lowest") instanceof Number n) {
+                price = n.longValue();
+            }
+            if (link == null && price == null) continue;
+            PriceLink pl = new PriceLink(price, link);
+            if (first == null) first = pl;
+            if (source != null && source.toLowerCase().contains("trip.com")) return pl;
+        }
+        return first;
+    }
+
     /**
      * Lấy danh sách ảnh chi tiết của Hotel từ SerpApi (google_hotels_photos engine).
      * Yêu cầu propertyToken từ API google_hotels gốc.
@@ -545,6 +627,162 @@ public class SerpApiClient {
             log.debug("Failed to parse SerpApi place data: {}", e.getMessage());
             return Optional.empty();
         }
+    }
+
+    // ─── Google Flights ─────────────────────────────────────────────────────
+
+    public record FlightSegment(String airline, String airlineLogo, String flightNumber,
+            String departureAirport, String departureTime,
+            String arrivalAirport, String arrivalTime, Integer durationMinutes) {}
+
+    public record FlightOption(Long priceVnd, Integer totalDurationMinutes, Integer stops,
+            List<FlightSegment> segments, String departureToken, String bookingToken) {}
+
+    public record FlightBookingOption(String source, Long priceVnd, String bookingLink) {}
+
+    /**
+     * Google Flights search (engine=google_flights).
+     * type: 1=round-trip (cần returnDate), 2=one-way.
+     * departureToken != null: lấy chặng kế tiếp (return) cho round-trip.
+     * Ưu tiên best_flights, fallback other_flights. Fail-soft → List rỗng.
+     */
+    @SuppressWarnings("unchecked")
+    public List<FlightOption> searchFlights(String departureId, String arrivalId,
+            LocalDate outbound, LocalDate returnDate, Integer adults, String departureToken) {
+        if (!properties.isEnabled() || apiKeyBlank()) return List.of();
+        if (departureId == null || arrivalId == null || outbound == null) return List.of();
+        boolean roundTrip = returnDate != null && returnDate.isAfter(outbound);
+        try {
+            log.info("SerpApi google_flights {}->{} {}{} token={}", departureId, arrivalId, outbound,
+                    roundTrip ? (".." + returnDate) : " (one-way)", departureToken != null);
+            Map<String, Object> resp = client.get()
+                    .uri(b -> {
+                        var u = b.path("/search")
+                                .queryParam("engine", "google_flights")
+                                .queryParam("departure_id", departureId)
+                                .queryParam("arrival_id", arrivalId)
+                                .queryParam("outbound_date", outbound.format(HOTEL_DATE_FORMAT))
+                                .queryParam("type", roundTrip ? "1" : "2")
+                                .queryParam("adults", adults != null ? adults.toString() : "1")
+                                .queryParam("currency", "VND")
+                                .queryParam("gl", "vn")
+                                .queryParam("hl", "vi")
+                                .queryParam("api_key", properties.getApiKey());
+                        if (roundTrip) u.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
+                        if (departureToken != null && !departureToken.isBlank()) u.queryParam("departure_token", departureToken);
+                        return u.build();
+                    })
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                    .block();
+            if (resp == null) return List.of();
+            List<FlightOption> options = new ArrayList<>();
+            parseFlightArray(resp.get("best_flights"), options);
+            if (options.isEmpty()) parseFlightArray(resp.get("other_flights"), options);
+            return options;
+        } catch (Exception e) {
+            log.warn("SerpApi google_flights failed {}->{}: {}", departureId, arrivalId, e.getMessage());
+            return List.of();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void parseFlightArray(Object arrObj, List<FlightOption> out) {
+        if (!(arrObj instanceof List<?> arr)) return;
+        for (Object o : arr) {
+            if (!(o instanceof Map<?, ?> m)) continue;
+            Long price = m.get("price") instanceof Number n ? n.longValue() : null;
+            Integer totalDuration = m.get("total_duration") instanceof Number n ? n.intValue() : null;
+            String departureToken = stringOrNull(m.get("departure_token"));
+            String bookingToken = stringOrNull(m.get("booking_token"));
+
+            List<FlightSegment> segments = new ArrayList<>();
+            if (m.get("flights") instanceof List<?> segs) {
+                for (Object so : segs) {
+                    if (so instanceof Map<?, ?> sm) segments.add(parseSegment((Map<String, Object>) sm));
+                }
+            }
+            int stops = m.get("layovers") instanceof List<?> lay ? lay.size()
+                    : Math.max(0, segments.size() - 1);
+
+            out.add(new FlightOption(price, totalDuration, stops, segments, departureToken, bookingToken));
+        }
+    }
+
+    private FlightSegment parseSegment(Map<String, Object> sm) {
+        String airline = stringOrNull(sm.get("airline"));
+        String airlineLogo = stringOrNull(sm.get("airline_logo"));
+        String flightNumber = stringOrNull(sm.get("flight_number"));
+        Integer duration = sm.get("duration") instanceof Number n ? n.intValue() : null;
+        String depId = null, depTime = null, arrId = null, arrTime = null;
+        if (sm.get("departure_airport") instanceof Map<?, ?> dep) {
+            depId = stringOrNull(dep.get("id"));
+            depTime = stringOrNull(dep.get("time"));
+        }
+        if (sm.get("arrival_airport") instanceof Map<?, ?> arr) {
+            arrId = stringOrNull(arr.get("id"));
+            arrTime = stringOrNull(arr.get("time"));
+        }
+        return new FlightSegment(airline, airlineLogo, flightNumber, depId, depTime, arrId, arrTime, duration);
+    }
+
+    /**
+     * Booking Options cho 1 flight đã chọn (booking_token từ searchFlights).
+     * Trả danh sách nguồn đặt vé (book_with) + giá + link. Fail-soft → List rỗng.
+     */
+    @SuppressWarnings("unchecked")
+    public List<FlightBookingOption> fetchFlightBookingOptions(String departureId, String arrivalId,
+            LocalDate outbound, LocalDate returnDate, Integer adults, String bookingToken) {
+        if (!properties.isEnabled() || apiKeyBlank()) return List.of();
+        if (bookingToken == null || bookingToken.isBlank()) return List.of();
+        boolean roundTrip = returnDate != null && returnDate.isAfter(outbound);
+        try {
+            log.info("SerpApi google_flights booking options {}->{}", departureId, arrivalId);
+            Map<String, Object> resp = client.get()
+                    .uri(b -> {
+                        var u = b.path("/search")
+                                .queryParam("engine", "google_flights")
+                                .queryParam("departure_id", departureId)
+                                .queryParam("arrival_id", arrivalId)
+                                .queryParam("outbound_date", outbound.format(HOTEL_DATE_FORMAT))
+                                .queryParam("type", roundTrip ? "1" : "2")
+                                .queryParam("adults", adults != null ? adults.toString() : "1")
+                                .queryParam("currency", "VND")
+                                .queryParam("gl", "vn")
+                                .queryParam("hl", "vi")
+                                .queryParam("booking_token", bookingToken)
+                                .queryParam("api_key", properties.getApiKey());
+                        if (roundTrip) u.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
+                        return u.build();
+                    })
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                    .block();
+            if (resp == null) return List.of();
+            List<FlightBookingOption> result = new ArrayList<>();
+            if (resp.get("booking_options") instanceof List<?> opts) {
+                for (Object o : opts) {
+                    if (!(o instanceof Map<?, ?> m)) continue;
+                    Map<String, Object> sel = m.get("together") instanceof Map<?, ?> tg
+                            ? (Map<String, Object>) tg : (Map<String, Object>) m;
+                    String source = stringOrNull(sel.get("book_with"));
+                    Long price = sel.get("price") instanceof Number n ? n.longValue() : null;
+                    String link = sel.get("booking_request") instanceof Map<?, ?> br
+                            ? stringOrNull(br.get("url")) : null;
+                    if (source != null || link != null) result.add(new FlightBookingOption(source, price, link));
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            log.warn("SerpApi google_flights booking options failed {}->{}: {}", departureId, arrivalId, e.getMessage());
+            return List.of();
+        }
+    }
+
+    private boolean apiKeyBlank() {
+        return properties.getApiKey() == null || properties.getApiKey().isBlank();
     }
 
     private static String stringOrNull(Object o) {

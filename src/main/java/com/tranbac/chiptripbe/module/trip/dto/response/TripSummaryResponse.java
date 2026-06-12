@@ -24,5 +24,10 @@ public class TripSummaryResponse {
     private LocalDateTime updatedAt;
     private Long totalCostVnd;
     private String imageUrl;
+    private Boolean isPublic;
+    private Integer likesCount;
+    private Integer commentsCount;
+    /** UPCOMING / ONGOING / COMPLETED — derived từ dateStart/dateEnd. */
+    private String status;
 }
 

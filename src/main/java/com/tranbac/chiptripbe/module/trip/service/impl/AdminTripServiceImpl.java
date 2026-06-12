@@ -9,7 +9,9 @@ import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.entity.TripDay;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ChecklistItemRepository;
+import com.tranbac.chiptripbe.module.trip.repository.TripCommentRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripDayRepository;
+import com.tranbac.chiptripbe.module.trip.repository.TripLikeRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.trip.service.AdminTripService;
 import com.tranbac.chiptripbe.module.trip.specification.TripSpecification;
@@ -36,6 +38,8 @@ class AdminTripServiceImpl implements AdminTripService {
     private final TripDayRepository tripDayRepository;
     private final ActivityRepository activityRepository;
     private final ChecklistItemRepository checklistItemRepository;
+    private final TripLikeRepository tripLikeRepository;
+    private final TripCommentRepository tripCommentRepository;
 
     @Override
     public Page<TripSummaryResponse> getAllTrips(Long userId, LocalDate from, LocalDate to, Pageable pageable) {
@@ -118,6 +122,9 @@ class AdminTripServiceImpl implements AdminTripService {
     public void deleteTrip(Long tripId) {
         Trip trip = tripRepository.findById(tripId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy chuyến đi"));
+        // likes/comments dùng cột tripId Long thuần (không FK cascade) — phải cleanup tay
+        tripLikeRepository.deleteByTripId(tripId);
+        tripCommentRepository.deleteByTripId(tripId);
         tripRepository.delete(trip);
         log.info("Admin deleted tripId={}", tripId);
     }
