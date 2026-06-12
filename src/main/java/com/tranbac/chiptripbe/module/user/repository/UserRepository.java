@@ -1,6 +1,7 @@
 package com.tranbac.chiptripbe.module.user.repository;
 
 import com.tranbac.chiptripbe.module.user.entity.User;
+import com.tranbac.chiptripbe.module.user.entity.Role;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
@@ -35,4 +36,16 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
 
     @Query("SELECT u.aiCredits FROM User u WHERE u.id = :userId")
     Integer findAiCreditsById(@Param("userId") Long userId);
+
+    /** Cộng credits atomic (nạp tiền qua webhook). Trả số dòng affected. */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE User u SET u.aiCredits = u.aiCredits + :amount WHERE u.id = :userId")
+    int addCredits(@Param("userId") Long userId, @Param("amount") int amount);
+
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE User u SET u.role = :premiumRole " +
+           "WHERE u.id = :userId AND u.role <> :adminRole")
+    int upgradeToPremiumUnlessAdmin(@Param("userId") Long userId,
+                                    @Param("premiumRole") Role premiumRole,
+                                    @Param("adminRole") Role adminRole);
 }

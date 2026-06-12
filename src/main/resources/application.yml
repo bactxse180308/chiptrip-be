@@ -94,6 +94,22 @@ app:
     public-url: ${R2_PUBLIC_URL:}
   chat:
     image-max-bytes: 5242880
+  sepay:
+    api-key: ${SEPAY_API_KEY:}
+    bank-account: ${SEPAY_BANK_ACCOUNT:}
+    bank-code: ${SEPAY_BANK_CODE:ACB}
+    account-holder: ${SEPAY_ACCOUNT_HOLDER}
+    qr-base-url: https://qr.sepay.vn/img
+    qr-template: compact
+    order-code-prefix: ${SEPAY_ORDER_CODE_PREFIX:DH}
+    order-expiry-minutes: 15
+    plans:
+      PREMIUM:
+        price-vnd: 49000
+        credits: 1
+      PRO:
+        price-vnd: 109000
+        credits: 3
   rate-limit:
     # DEV: nới lỏng để dễ test — lên production nhớ hạ về (login 5/15p, register 3/60p,
     # forgot 3/60p, generate 5/1p, default 60/1p)

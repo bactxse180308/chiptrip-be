@@ -55,7 +55,8 @@ public class SecurityConfig {
             "/swagger-ui.html",
             "/api-docs/**",
             // WebSocket handshake (SockJS) — auth thực hiện ở STOMP CONNECT frame
-            "/ws/**"
+            "/ws/**",
+            "/api/v1/webhooks/**"
     };
 
     @Bean
@@ -77,6 +78,14 @@ public class SecurityConfig {
                                 "/api/v1/places/*/reviews",
                                 "/api/v1/places/*/reviews/summary").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
+                        .requestMatchers(
+                                "/api/v1/webhooks/sepay",
+                                "/error",
+                                "/swagger-ui/**",
+                                "/swagger-ui.html",
+                                "/api-docs/**"
+                        ).permitAll()
+                        .requestMatchers("/api/v1/payments/**").authenticated()
                         .anyRequest().authenticated()
                 )
                 .exceptionHandling(ex -> ex
