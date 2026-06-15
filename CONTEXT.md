@@ -470,15 +470,18 @@ TripServiceImpl.generateTrip()           (orchestration, KHÔNG @Transactional)
    │       - Tổng cost ≤ budget × 1.10 hoặc ≤ budget + 1.000.000đ
    │
    ├── 4. resolvePlaces                  (HTTP calls Goong + SerpApi, fail-soft per activity)
-   │       Với mỗi activity geocodable & có searchQuery:
-   │       - PlaceEnrichmentService.resolvePlace(searchQuery, destination)
+   │       - Geocode destination/departure thành GeoAnchor để validate vùng theo GPS
+   │       - Dedup các activity geocodable theo canonicalKey(searchQuery) trước khi fan-out
+   │       Với mỗi group geocodable:
+   │       - PlaceEnrichmentService.resolvePlace(searchQuery, destination, anchors, deadline)
    │           - PlaceCache lookup theo normalizedName + normalizedDestination
-   │           - Cache miss → GoongClient.forwardGeocode V2 (has_vnid)
-   │           - SerpApi enrich (rating/ảnh/giờ/reviews)
+   │           - Cache miss → GoongClient.forwardGeocode V2 (has_vnid), validate theo address/anchor/province
+   │           - Goong miss/mismatch → fallback SerpApi Google Maps nếu candidate vẫn đúng vùng
+   │           - SerpApi enrich (rating/ảnh/giờ/reviews), bỏ qua external call còn lại nếu quá deadline
    │           - Upsert PlaceCache trong tx ngắn riêng
    │       - Nếu ACCOMMODATION: enrichAccommodation (SerpApi Google Hotels) lấy
-   │         pricePerNightVnd + bookingUrl theo dayDate
-   │       - Exception cho 1 activity → log warn, skip, trip vẫn được tạo
+   │         pricePerNightVnd + bookingUrl theo check-in/out của group khách sạn đó
+   │       - Exception cho 1 group → log warn, skip, trip vẫn được tạo
    │
    ▼
 TripGenerationPersistenceServiceImpl.persistGeneratedTrip   (@Transactional — 1 tx ngắn)

@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.math.BigDecimal;
@@ -30,6 +31,8 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class SerpApiClient {
 
+    private static final int SERPAPI_MAX_IN_MEMORY_SIZE = 2 * 1024 * 1024;
+
     private final WebClient.Builder webClientBuilder;
     private final SerpApiProperties properties;
     private final ObjectMapper objectMapper;
@@ -38,7 +41,14 @@ public class SerpApiClient {
 
     @PostConstruct
     void init() {
-        client = webClientBuilder.baseUrl(properties.getBaseUrl()).build();
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+                .codecs(configurer -> configurer.defaultCodecs()
+                        .maxInMemorySize(SERPAPI_MAX_IN_MEMORY_SIZE))
+                .build();
+        client = webClientBuilder.clone()
+                .baseUrl(properties.getBaseUrl())
+                .exchangeStrategies(strategies)
+                .build();
     }
 
     /**

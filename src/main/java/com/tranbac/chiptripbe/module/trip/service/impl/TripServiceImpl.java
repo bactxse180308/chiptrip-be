@@ -45,6 +45,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -123,6 +124,9 @@ class TripServiceImpl implements TripService {
         return user.getPreferences();
     }
 
+    /** Activity geocodable kèm ngày của AiDay chứa nó (null nếu date AI sinh không parse được). */
+    private record GeoActivity(AiItineraryResult.AiActivity act, LocalDate date) {}
+
     /**
      * Thu thập tất cả geocodable activities từ itinerary rồi resolve song song.
      * Fail-soft: 1 activity resolve fail không làm fail toàn bộ generate trip.
@@ -131,46 +135,93 @@ class TripServiceImpl implements TripService {
             AiItineraryResult itinerary, GenerateTripRequest request) {
         if (itinerary.getDays() == null) return new ConcurrentHashMap<>();
 
-        List<AiItineraryResult.AiActivity> geocodable = new ArrayList<>();
+        List<GeoActivity> geocodable = new ArrayList<>();
         for (AiItineraryResult.AiDay day : itinerary.getDays()) {
             if (day.getActivities() == null) continue;
+            LocalDate dayDate;
+            try {
+                dayDate = LocalDate.parse(day.getDate());
+            } catch (Exception e) {
+                dayDate = null;
+            }
             for (AiItineraryResult.AiActivity act : day.getActivities()) {
                 ActivityType type = parseActivityType(act.getType());
                 if (!shouldGeocode(type)) continue;
                 if (act.getSearchQuery() == null || act.getSearchQuery().isBlank()) continue;
-                geocodable.add(act);
+                geocodable.add(new GeoActivity(act, dayDate));
             }
         }
 
         return resolveAllPlacesParallel(
                 geocodable,
                 request.getDestination(),
+                request.getDeparture(),
                 request.getStartDate(),
                 request.getEndDate(),
                 request.getPeopleCount());
     }
 
     private Map<AiItineraryResult.AiActivity, PlaceCache> resolveAllPlacesParallel(
-            List<AiItineraryResult.AiActivity> activities,
+            List<GeoActivity> activities,
             String destination,
-            LocalDate checkIn,
-            LocalDate checkOut,
+            String departure,
+            LocalDate tripStart,
+            LocalDate tripEnd,
             Integer adults) {
         Map<AiItineraryResult.AiActivity, PlaceCache> result = new ConcurrentHashMap<>();
+        if (activities.isEmpty()) return result;
 
-        List<CompletableFuture<Void>> futures = activities.stream()
-                .map(act -> CompletableFuture.runAsync(() -> {
+        // Anchor GPS validate vùng (fail-soft: anchor rỗng → so chuỗi địa chỉ như cũ).
+        // anchorDep chỉ dùng cho TRANSPORT — phương tiện đầu đi nằm ở thành phố xuất phát.
+        PlaceEnrichmentService.GeoAnchor anchorDest =
+                placeEnrichmentService.geocodeAnchor(destination).orElse(null);
+        PlaceEnrichmentService.GeoAnchor anchorDep =
+                placeEnrichmentService.geocodeAnchor(departure).orElse(null);
+
+        // Dedup theo canonical key (cùng phép chuẩn hóa với cache key của resolvePlace) TRƯỚC
+        // fan-out: khách sạn N đêm / query khác chuỗi nhưng cùng địa điểm chỉ resolve + enrich
+        // 1 lần, mọi activity trong group share cùng instance PlaceCache (giá nhất quán)
+        Map<String, List<GeoActivity>> groups = new LinkedHashMap<>();
+        for (GeoActivity ga : activities) {
+            groups.computeIfAbsent(placeEnrichmentService.canonicalKey(ga.act().getSearchQuery()),
+                    k -> new ArrayList<>()).add(ga);
+        }
+
+        // Deadline chung: quá hạn thì resolvePlace tự bỏ các external call còn lại —
+        // tránh đốt quota Goong/SerpApi sau khi orTimeout(60s) đã nổ và trip đã persist
+        Instant deadline = Instant.now().plusSeconds(55);
+
+        List<List<GeoActivity>> groupList = List.copyOf(groups.values());
+        List<CompletableFuture<PlaceCache>> futures = groupList.stream()
+                .map(group -> CompletableFuture.supplyAsync(() -> {
+                    AiItineraryResult.AiActivity first = group.get(0).act();
+                    boolean hasTransport = group.stream()
+                            .anyMatch(g -> parseActivityType(g.act().getType()) == ActivityType.TRANSPORT);
+                    boolean hasAccommodation = group.stream()
+                            .anyMatch(g -> parseActivityType(g.act().getType()) == ActivityType.ACCOMMODATION);
+                    List<PlaceEnrichmentService.GeoAnchor> anchors = new ArrayList<>(2);
+                    if (anchorDest != null) anchors.add(anchorDest);
+                    if (hasTransport && anchorDep != null) anchors.add(anchorDep);
                     try {
-                        Optional<PlaceCache> placeOpt = placeEnrichmentService.resolvePlace(act.getSearchQuery(), destination);
+                        Optional<PlaceCache> placeOpt = placeEnrichmentService.resolvePlace(
+                                first.getSearchQuery(), destination, anchors, deadline);
                         placeOpt.ifPresent(cache -> {
-                            result.put(act, cache);
-                            if (parseActivityType(act.getType()) == ActivityType.ACCOMMODATION) {
-                                placeEnrichmentService.enrichAccommodation(cache, checkIn, checkOut, adults);
+                            if (hasAccommodation) {
+                                // Check-in/out theo đúng dải đêm của khách sạn này (trip có thể
+                                // đổi khách sạn giữa chừng) — fallback range cả trip nếu thiếu date
+                                LocalDate checkIn = group.stream().map(GeoActivity::date)
+                                        .filter(Objects::nonNull).min(LocalDate::compareTo).orElse(tripStart);
+                                LocalDate checkOut = group.stream().map(GeoActivity::date)
+                                        .filter(Objects::nonNull).max(LocalDate::compareTo)
+                                        .map(d -> d.plusDays(1)).orElse(tripEnd);
+                                placeEnrichmentService.enrichAccommodation(cache, checkIn, checkOut, adults, deadline);
                             }
                         });
+                        return placeOpt.orElse(null);
                     } catch (Exception e) {
                         log.warn("Resolve place failed (skip): activity='{}', searchQuery='{}', error={}",
-                                act.getName(), act.getSearchQuery(), e.getMessage());
+                                first.getName(), first.getSearchQuery(), e.getMessage());
+                        return null;
                     }
                 }, enrichmentExecutor))
                 .toList();
@@ -182,6 +233,18 @@ class TripServiceImpl implements TripService {
                     return null;
                 })
                 .join();
+
+        // Populate sau join, chỉ từ future đã hoàn tất — task bị orTimeout bỏ rơi không thể
+        // ghi xen vào map trong lúc persist đang đọc; mỗi group nguyên tử (có place cả nhóm)
+        for (int i = 0; i < futures.size(); i++) {
+            CompletableFuture<PlaceCache> f = futures.get(i);
+            if (!f.isDone() || f.isCompletedExceptionally()) continue;
+            PlaceCache cache = f.getNow(null);
+            if (cache == null) continue;
+            for (GeoActivity ga : groupList.get(i)) {
+                result.put(ga.act(), cache);
+            }
+        }
 
         return result;
     }

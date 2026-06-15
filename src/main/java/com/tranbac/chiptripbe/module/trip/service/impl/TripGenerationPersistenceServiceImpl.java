@@ -192,7 +192,7 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
             BigDecimal longitude = p != null ? p.getLongitude() : null;
             String placeId = p != null ? p.getGoongPlaceId() : null;
             String formattedAddress = p != null ? p.getAddress() : null;
-            String geocodingProvider = p != null ? "goong" : null;
+            String geocodingProvider = p != null ? (p.getGoongPlaceId() != null ? "goong" : "serpapi") : null;
             Long placeCacheId = p != null ? p.getId() : null;
             String activityImageUrl = p != null ? extractFirstPhotoUrl(p.getPhotosJson()) : null;
             // Luôn ưu tiên dùng link từ SerpApi (đã chứa tham số ngày, số người) thay vì link generic của AI cho khách sạn

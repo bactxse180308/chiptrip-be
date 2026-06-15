@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Optional;
 
@@ -40,6 +41,50 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public PlaceCache save(PlaceCache place) {
         return repository.save(place);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public PlaceCache refreshLastSyncedAt(PlaceCache place, LocalDateTime lastSyncedAt) {
+        if (place == null) return null;
+        if (place.getId() == null) {
+            place.setLastSyncedAt(lastSyncedAt);
+            return repository.save(place);
+        }
+
+        PlaceCache current = repository.findById(place.getId()).orElseGet(() -> repository.save(place));
+        current.setLastSyncedAt(lastSyncedAt);
+        return current;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public PlaceCache saveAccommodationEnrichment(PlaceCache place,
+                                                  String bookingUrl,
+                                                  Long pricePerNightVnd,
+                                                  BigDecimal rating,
+                                                  String photosJson,
+                                                  String reviewsJson) {
+        if (place == null) return null;
+        if (place.getId() == null) return repository.save(place);
+
+        PlaceCache current = repository.findById(place.getId()).orElseGet(() -> repository.save(place));
+        if (bookingUrl != null && !bookingUrl.isBlank()) {
+            current.setBookingUrl(bookingUrl);
+        }
+        if (pricePerNightVnd != null) {
+            current.setPricePerNightVnd(pricePerNightVnd);
+        }
+        if (rating != null) {
+            current.setRating(rating);
+        }
+        if (current.getPhotosJson() == null && photosJson != null) {
+            current.setPhotosJson(photosJson);
+        }
+        if (current.getReviewsJson() == null && reviewsJson != null) {
+            current.setReviewsJson(reviewsJson);
+        }
+        return current;
     }
 
     /**

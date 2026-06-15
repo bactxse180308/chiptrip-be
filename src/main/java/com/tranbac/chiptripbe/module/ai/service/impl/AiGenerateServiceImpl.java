@@ -103,9 +103,11 @@ class AiGenerateServiceImpl implements AiService {
                 - Chi phí tính bằng VNĐ nguyên (integer), không dấu phẩy, không chữ "VNĐ".
                 - KHÔNG tự sinh latitude/longitude. Backend sẽ geocode từ searchQuery.
                 - Mỗi activity phải có searchQuery rõ ràng để backend tìm tọa độ.
-                  searchQuery phải gồm tên địa điểm cụ thể + tên tỉnh/thành phố.
-                  Ví dụ đúng: "Bánh căn Nhà Chung Đà Lạt", "Hồ Xuân Hương Đà Lạt", "Sân bay Nội Bài Hà Nội".
-                  Ví dụ sai: "Nhà hàng địa phương", "Khu vui chơi" (quá chung, không tìm được).
+                  searchQuery phải là câu tìm kiếm bản đồ, gồm tên địa điểm cụ thể + quận/huyện hoặc tỉnh/thành phố.
+                  KHÔNG đưa động từ/ngữ cảnh lịch trình vào searchQuery như "ăn tối tại", "tham quan", "đi", "check-in".
+                  Dùng tên vùng dễ match với bản đồ: "Hồ Chí Minh" thay vì "Thành phố Hồ Chí Minh", "Đà Nẵng" thay vì "Thành phố Đà Nẵng".
+                  Ví dụ đúng: "Bánh căn Nhà Chung Đà Lạt", "Hồ Xuân Hương Đà Lạt", "Thảo Cầm Viên Sài Gòn Hồ Chí Minh".
+                  Ví dụ sai: "Ăn tối tại nhà hàng địa phương", "Tham quan khu vui chơi", "Khách sạn trung tâm" (quá chung, không tìm được).
                 - TRANSPORT searchQuery phải thuộc đúng thành phố nơi phương tiện xuất phát/đến, KHÔNG gộp 2 tỉnh/thành vào cùng 1 query:
                   Ví dụ đúng: "Sân bay Quốc tế Đà Nẵng Đà Nẵng" (xuất phát Đà Nẵng), "Sân bay Liên Khương Đà Lạt" (đến Đà Lạt).
                   Ví dụ sai: "Sân bay Quốc tế Đà Nẵng Đà Lạt" (sai — gộp tên 2 tỉnh thành 1 query).
@@ -113,11 +115,12 @@ class AiGenerateServiceImpl implements AiService {
                   Ví dụ đúng: "Ana Mandara Villas Đà Lạt", "Homestay Hoa Lan Đà Lạt".
                   Ví dụ sai: "Khách sạn trung tâm", "Homestay gần chợ" (quá chung, không geocode được).
                 - Phân bổ chi phí hợp lý, tổng không vượt ngân sách.
+                - costVnd của mỗi hoạt động là TỔNG chi phí khoản đó cho CẢ NHÓM (mọi thành viên), không phải chi phí mỗi người.
                 - type phải là một trong: FOOD, ATTRACTION, TRANSPORT, ACCOMMODATION, OTHER.
                 - category trong checklist phải là một trong: PAPERS, CLOTHES, HYGIENE, OTHER.
-                - title phải nhắc đến điểm đến và số ngày của chuyến đi.
+                - title BẮT BUỘC chứa đúng tên điểm đến và số ngày của chuyến đi.
                   Ví dụ đúng: "Hành trình Đà Lạt 3 ngày 2 đêm".
-                - Mỗi ngày nên có 4-6 hoạt động, không nhồi quá nhiều, để lịch trình thực tế và khả thi.
+                - Mỗi ngày nên có 5-7 hoạt động, không nhồi quá nhiều, để lịch trình thực tế và khả thi.
                 - description ngắn gọn, 1-2 câu, đi thẳng vào nội dung.
                 - bookingUrl để null nếu không chắc chắn link có thật. KHÔNG bịa URL.
                 - Với type OTHER không phải địa điểm cụ thể (vd "nghỉ ngơi", "tự do"), searchQuery có thể để null.
@@ -156,6 +159,13 @@ class AiGenerateServiceImpl implements AiService {
                 ? request.getPeopleCount() : 1;
         long budgetPerPerson = request.getBudgetVnd() / peopleCount;
 
+        // #6: du lịch tại chỗ (điểm khởi hành trùng điểm đến) thì KHÔNG yêu cầu chặng di chuyển liên tỉnh
+        String firstDayLine = isSameLocation(request.getDeparture(), request.getDestination())
+                ? String.format("- Du lịch tại chỗ ở %s: KHÔNG thêm chặng di chuyển liên tỉnh, tập trung khám phá trong %s.",
+                        request.getDestination(), request.getDestination())
+                : String.format("- Ngày đầu bao gồm di chuyển từ %s đến %s (TRANSPORT).",
+                        request.getDeparture(), request.getDestination());
+
         String userPrompt = String.format("""
                 Tạo lịch trình du lịch với thông tin sau:
                 - Điểm khởi hành: %s
@@ -168,9 +178,12 @@ class AiGenerateServiceImpl implements AiService {
                 - Phong cách: %s
 
                 Yêu cầu:
+                - title phải chứa tên điểm đến "%s" và số ngày (%d ngày).
                 - Mỗi ngày 5-7 hoạt động từ sáng đến tối.
-                - Ngày đầu bao gồm di chuyển từ %s đến %s (TRANSPORT).
+                %s
                 - Ít nhất 2 ATTRACTION mỗi ngày.
+                - Trước khi trả JSON, tự kiểm tra mọi searchQuery của FOOD/ATTRACTION/ACCOMMODATION/TRANSPORT:
+                  phải là tên địa điểm có thể copy vào Google Maps/Goong để tìm đúng ngay, không phải câu mô tả hoạt động.
                 - Bao gồm checklist chuẩn bị đồ cho chuyến đi (%d người, %d ngày).
                 """,
                 request.getDeparture(),
@@ -182,8 +195,9 @@ class AiGenerateServiceImpl implements AiService {
                 request.getBudgetVnd(),
                 budgetPerPerson,
                 stylesText,
-                request.getDeparture(),
                 request.getDestination(),
+                numDays,
+                firstDayLine,
                 peopleCount,
                 numDays
         );
@@ -230,6 +244,23 @@ class AiGenerateServiceImpl implements AiService {
         return text.isEmpty() ? null : text;
     }
 
+    /** #6: coi là "du lịch tại chỗ" khi điểm khởi hành và điểm đến là cùng một nơi. */
+    private static boolean isSameLocation(String departure, String destination) {
+        if (departure == null || destination == null) return false;
+        String d = canonLocation(departure);
+        return !d.isBlank() && d.equals(canonLocation(destination));
+    }
+
+    private static String canonLocation(String s) {
+        return s.toLowerCase()
+                .replace("thành phố", " ")
+                .replace("tỉnh", " ")
+                .replace("tp.", " ")
+                .replace("tp ", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
     // ─── HTTP call ────────────────────────────────────────────────────────────
 
     private Map<String, Object> callLlm(Map<String, Object> body) {
@@ -258,10 +289,20 @@ class AiGenerateServiceImpl implements AiService {
 
     private AiItineraryResult parseJson(String content) {
         try {
-            return objectMapper.readValue(content, AiItineraryResult.class);
+            return objectMapper.readValue(stripCodeFence(content), AiItineraryResult.class);
         } catch (JsonProcessingException e) {
             throw new AiRetryableException("JSON parse failed: " + e.getMessage());
         }
+    }
+
+    /** Phòng khi model bọc JSON trong ```json ... ``` dù prompt đã yêu cầu JSON thuần. */
+    private static String stripCodeFence(String content) {
+        String t = content.trim();
+        if (!t.startsWith("```")) return t;
+        int firstNewline = t.indexOf('\n');
+        if (firstNewline >= 0) t = t.substring(firstNewline + 1);
+        if (t.endsWith("```")) t = t.substring(0, t.length() - 3);
+        return t.trim();
     }
 
     // ─── Response helpers (OpenAI Chat Completions format) ────────────────────

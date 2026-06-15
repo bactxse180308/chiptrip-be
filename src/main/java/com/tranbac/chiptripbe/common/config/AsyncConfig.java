@@ -6,6 +6,7 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.concurrent.Executor;
+import java.util.concurrent.ThreadPoolExecutor;
 
 @Configuration
 @EnableAsync
@@ -20,6 +21,9 @@ public class AsyncConfig {
         executor.setThreadNamePrefix("enrich-");
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(30);
+        // Queue đầy → chạy đồng bộ trên request thread thay vì ném RejectedExecutionException
+        // (AbortPolicy mặc định sẽ đánh sập cả generateTrip dù từng task đã fail-soft)
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         executor.initialize();
         return executor;
     }

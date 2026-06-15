@@ -48,16 +48,19 @@ Backend — TripServiceImpl.generateTrip()  (KHÔNG @Transactional — Propagati
   │       - Tổng cost ≤ budget × 1.10 hoặc ≤ budget + 1.000.000đ
   │
   ├─ 4. resolvePlaces  (HTTP calls, fail-soft per activity)
-  │       Với mỗi activity geocodable & có searchQuery:
-  │       └─ PlaceEnrichmentService.resolvePlace(searchQuery, destination)
+  │       ├─ Geocode destination/departure thành GeoAnchor để validate vùng theo GPS
+  │       ├─ Dedup geocodable activity theo canonicalKey(searchQuery) trước khi fan-out
+  │       └─ Với mỗi group geocodable:
+  │           ├─ PlaceEnrichmentService.resolvePlace(searchQuery, destination, anchors, deadline)
   │           ├─ PlaceCache lookup theo normalizedName + normalizedDestination
   │           ├─ Cache miss → GoongClient.forwardGeocode V2 (has_vnid)
   │           │     → lat/lng + placeId + formattedAddress + provinceName/communeName
+  │           │     → validate theo address/GeoAnchor/province; miss/mismatch thì fallback SerpApi
   │           ├─ SerpApi enrich (engine google_maps/google_maps_photos/google_maps_reviews)
   │           │     → rating, ảnh, giờ mở cửa, reviews → lưu vào PlaceCache
   │           ├─ Nếu ACCOMMODATION: enrichAccommodation gọi SerpApi google_hotels
-  │           │     → pricePerNightVnd + bookingUrl theo dayDate
-  │           └─ Exception cho 1 activity → log warn, skip activity, trip vẫn tạo
+  │           │     → pricePerNightVnd + bookingUrl theo check-in/out của group khách sạn
+  │           └─ Exception cho 1 group → log warn, skip group, trip vẫn tạo
   │
   ▼
 TripGenerationPersistenceServiceImpl.persistGeneratedTrip   (@Transactional — 1 tx)
@@ -66,7 +69,7 @@ TripGenerationPersistenceServiceImpl.persistGeneratedTrip   (@Transactional — 
   ├─ Với mỗi AiDay → save TripDay
   │   └─ Với mỗi AiActivity:
   │         ├─ Lấy PlaceCache từ resolvedPlaces map (identity-keyed)
-  │         ├─ Set lat/lng, placeId, formattedAddress, geocodingProvider="goong", placeCacheId
+  │         ├─ Set lat/lng, placeId, formattedAddress, geocodingProvider ("goong" hoặc "serpapi"), placeCacheId
   │         ├─ Nếu ACCOMMODATION & PlaceCache.pricePerNightVnd != null → override costVnd
   │         ├─ Ưu tiên PlaceCache.bookingUrl (đã có check_in/check_out) hơn aiActivity.bookingUrl
   │         ├─ imageUrl = ảnh đầu từ PlaceCache.photosJson
@@ -242,11 +245,12 @@ app:
 > - `AiGenerateServiceImpl.isGeocodableType()` (line 295)
 > - `AiItineraryValidator.needsSearchQuery()` (line 162)
 
-- Nếu Goong trả về kết quả → lưu `latitude`, `longitude`, `placeId`, `formattedAddress`, `geocodingProvider = "goong"`, `placeCacheId`
+- Nếu Goong trả về kết quả đúng vùng → lưu `latitude`, `longitude`, `placeId`, `formattedAddress`, `geocodingProvider = "goong"`, `placeCacheId`
+- Nếu Goong miss hoặc sai vùng → thử SerpApi fallback; nếu candidate đúng vùng thì lưu lat/lng và `geocodingProvider = "serpapi"` với `placeId = null`
 - SerpApi enrich thêm rating / giờ mở cửa / ảnh / reviews vào `PlaceCache` (TTL `cache-ttl-days`, backoff `retry-backoff-minutes`)
-- Với `ACCOMMODATION`: gọi thêm SerpApi `google_hotels` lấy `pricePerNightVnd` + `bookingUrl` theo `dayDate` (check-in/check-out)
+- Với `ACCOMMODATION`: gọi thêm SerpApi `google_hotels` lấy `pricePerNightVnd` + `bookingUrl` theo check-in/check-out của group khách sạn
 - Nếu không tìm thấy hoặc lỗi → `latitude/longitude = null`, không throw exception (graceful fallback per-activity)
-- Query gửi đi: `"<searchQuery>, <destination>"` (append destination nếu chưa có trong query)
+- Query gửi đi: `PlaceQueryUtil.buildPlaceQuery(searchQuery)`; validation vùng dựa trên destination/departure anchors và normalized destination
 
 ---
 

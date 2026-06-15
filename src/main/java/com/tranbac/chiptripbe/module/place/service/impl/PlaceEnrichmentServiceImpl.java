@@ -16,16 +16,23 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
+
+    /** Bán kính chấp nhận quanh anchor (destination/departure) khi địa chỉ không chứa destination. */
+    private static final double ANCHOR_RADIUS_KM = 60.0;
+
+    private static final int ANCHOR_CACHE_MAX = 1_000;
 
     private final PlaceCacheService placeCacheService;
     private final PlaceCacheRepository placeCacheRepository;
@@ -33,14 +40,52 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     private final SerpApiClient serpApiClient;
     private final ObjectMapper objectMapper;
 
+    /** Cache anchor theo normalize(tên) — destination lặp lại nhiều giữa các trip. Chỉ cache hit. */
+    private final ConcurrentHashMap<String, GeoAnchor> anchorCache = new ConcurrentHashMap<>();
+
     private String cleanPlaceName(String name) {
         if (name == null) return "";
-        String regex = "(?i)^(tham quan|check[- ]in|checkin|an trua|an toi|an sang|an|uong cafe|uong|binh minh tai|san may|di|tha den hoa dang|mua sam tai|mua sam|vieng|trai nghiem|ngam hoang hon|trekking|loi bo|dao bo|thuong thuc|check in|uong cà phe|uong ca phe|an trưa|an tối|an sáng|ăn trưa|ăn tối|ăn sáng|ăn|uống cafe|uống cà phê|uống ca phe|uống|bình minh tại|săn mây|đi|thả đèn hoa đăng|mua sắm tại|mua sắm|viếng|trải nghiệm|ngắm hoàng hôn|thưởng thức)\\s+";
+        // Chỉ giữ pattern đa âm tiết hoặc có dấu để tránh cắt nhầm tên địa điểm
+        // (bỏ "an", "di", "uong", "vieng" không dấu — dễ match "An Nhiên", "Di tích", v.v.)
+        String regex = "(?i)^(tham quan|check[- ]in|checkin|an trua|an toi|an sang|uong cafe|binh minh tai|san may|tha den hoa dang|mua sam tai|mua sam|trai nghiem|ngam hoang hon|trekking|loi bo|dao bo|thuong thuc|check in|uong cà phe|uong ca phe|an trưa|an tối|an sáng|ăn trưa|ăn tối|ăn sáng|ăn|uống cafe|uống cà phê|uống ca phe|uống|bình minh tại|săn mây|đi|thả đèn hoa đăng|mua sắm tại|mua sắm|viếng|trải nghiệm|ngắm hoàng hôn|thưởng thức)\\s+";
         String cleaned = name.replaceAll(regex, "").trim();
         if (cleaned.length() > 0) {
             cleaned = Character.toUpperCase(cleaned.charAt(0)) + cleaned.substring(1);
         }
         return cleaned;
+    }
+
+    /** Cùng phép chuẩn hóa với cache key của resolvePlace — dùng cho dedup trước fan-out. */
+    @Override
+    public String canonicalKey(String searchQuery) {
+        return normalize(cleanPlaceName(searchQuery));
+    }
+
+    /**
+     * Geocode anchor (destination/departure) qua Goong, cache theo tên. Sanity check:
+     * địa chỉ trả về phải chứa tên gốc — geocode sai lặng lẽ sẽ làm hỏng validation cả trip.
+     */
+    @Override
+    public Optional<GeoAnchor> geocodeAnchor(String locationName) {
+        if (locationName == null || locationName.isBlank()) return Optional.empty();
+        String key = normalize(locationName);
+        GeoAnchor cached = anchorCache.get(key);
+        if (cached != null) return Optional.of(cached);
+
+        Optional<GoongClient.GeocodeResult> geoOpt =
+                goongClient.forwardGeocode(PlaceQueryUtil.buildPlaceQuery(locationName.trim()));
+        if (geoOpt.isEmpty()) {
+            log.warn("Anchor geocode fail: '{}' — validation degrade về so chuỗi địa chỉ", locationName);
+            return Optional.empty();
+        }
+        GoongClient.GeocodeResult geo = geoOpt.get();
+        if (!addressMatchesDestination(geo.formattedAddress(), key)) {
+            log.warn("Anchor geocode mismatch: '{}' → address='{}' — bỏ anchor", locationName, geo.formattedAddress());
+            return Optional.empty();
+        }
+        GeoAnchor anchor = new GeoAnchor(geo.lat(), geo.lng(), geo.provinceName());
+        if (anchorCache.size() < ANCHOR_CACHE_MAX) anchorCache.put(key, anchor);
+        return Optional.of(anchor);
     }
 
     /**
@@ -49,7 +94,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
      */
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public Optional<PlaceCache> resolvePlace(String placeName, String destination) {
+    public Optional<PlaceCache> resolvePlace(String placeName, String destination,
+                                             List<GeoAnchor> anchors, Instant deadline) {
         if (placeName == null || placeName.isBlank()) return Optional.empty();
 
         String cleanedName = cleanPlaceName(placeName);
@@ -63,29 +109,38 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             return fresh;
         }
 
-        // 2. Goong geocode — bắt buộc để có lat/lng
+        if (pastDeadline(deadline)) return Optional.empty();
+
+        // 2. Goong geocode — ưu tiên để có lat/lng chính xác; SerpApi là fallback
         String geocodeQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
         Optional<GoongClient.GeocodeResult> geoOpt = goongClient.forwardGeocode(geocodeQuery);
         if (geoOpt.isEmpty()) {
-            log.debug("Goong geocode: không tìm thấy '{}'", geocodeQuery);
-            return Optional.empty();
+            log.debug("Goong geocode: không tìm thấy '{}', thử SerpApi fallback", geocodeQuery);
+            return resolvePlaceViaSerpApiFallback(cleanedName, normalized, normalizedDestination, destination,
+                    anchors, deadline);
         }
 
         GoongClient.GeocodeResult geo = geoOpt.get();
 
-        // 2b. Verify Goong result match destination — tránh lưu lat/lng tỉnh khác
-        if (!addressMatchesDestination(geo.formattedAddress(), normalizedDestination)) {
-            log.warn("Goong mismatch: query='{}', address='{}', expectedDestination='{}'",
+        // 2b. Verify vùng: address chứa destination HOẶC gần anchor HOẶC trùng province —
+        // tránh lưu lat/lng tỉnh khác, nhưng không reject oan vùng ven (sân bay, thác ngoại ô)
+        if (!matchesRegion(geo.formattedAddress(), geo.provinceName(), geo.lat(), geo.lng(),
+                normalizedDestination, anchors)) {
+            log.warn("Goong mismatch: query='{}', address='{}', expectedDestination='{}' — thử SerpApi fallback",
                     geocodeQuery, geo.formattedAddress(), destination);
-            return Optional.empty();
+            return resolvePlaceViaSerpApiFallback(cleanedName, normalized, normalizedDestination, destination,
+                    anchors, deadline);
         }
 
-        // 3. Dedup theo goongPlaceId (an toàn với duplicate trong DB)
+        // 3. Dedup theo goongPlaceId (an toàn với duplicate trong DB).
+        // Refresh lastSyncedAt rồi save — nếu không, row stale TTL sẽ miss cache mãi mãi
+        // và mỗi lần generate lại tốn 1 Goong call cho cùng địa điểm.
         if (geo.placeId() != null && !geo.placeId().isBlank()) {
             Optional<PlaceCache> byPlaceId = placeCacheRepository.findBestByGoongPlaceId(geo.placeId());
             if (byPlaceId.isPresent() && byPlaceId.get().isSerpEnriched()) {
-                log.debug("Place cache dedup by goongPlaceId='{}', reuse id={}", geo.placeId(), byPlaceId.get().getId());
-                return byPlaceId;
+                PlaceCache reused = byPlaceId.get();
+                log.debug("Place cache dedup by goongPlaceId='{}', reuse id={}", geo.placeId(), reused.getId());
+                return Optional.of(placeCacheService.refreshLastSyncedAt(reused, LocalDateTime.now()));
             }
         }
 
@@ -99,6 +154,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
 
         PlaceCache toSave;
         if (existing.isPresent()) {
+            // Row tái sử dụng giữ nguyên key gốc — re-key sang tên mới sẽ evict key cũ,
+            // gây ping-pong giữa 2 searchQuery cùng trỏ về 1 goongPlaceId
             toSave = existing.get();
         } else {
             toSave = new PlaceCache();
@@ -107,9 +164,6 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             toSave.setName(cleanedName);
         }
 
-        // Đảm bảo các field key luôn có
-        toSave.setNormalizedName(normalized);
-        toSave.setNormalizedDestination(normalizedDestination);
         toSave.setLatitude(geo.lat());
         toSave.setLongitude(geo.lng());
         toSave.setGoongPlaceId(geo.placeId());
@@ -119,7 +173,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         toSave.setLastSyncedAt(LocalDateTime.now());
 
         // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu data Goong)
-        SerpEnrichOutcome outcome = enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination, geo, placeName);
+        SerpEnrichOutcome outcome = enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination,
+                geo, anchors, deadline, placeName);
         toSave.setSerpEnriched(outcome.enriched());
         toSave.setSerpSyncedAt(outcome.syncedAt());
         try {
@@ -140,8 +195,13 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
      */
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut, Integer adults) {
+    public void enrichAccommodation(PlaceCache cache, LocalDate checkIn, LocalDate checkOut,
+                                    Integer adults, Instant deadline) {
         if (cache == null) return;
+        if (pastDeadline(deadline)) {
+            log.debug("Hotel enrich skip (deadline): cache id={} name='{}'", cache.getId(), cache.getName());
+            return;
+        }
         try {
             Optional<SerpApiClient.HotelData> hotelOpt = serpApiClient.searchHotel(cache.getName(), checkIn, checkOut, adults);
             if (hotelOpt.isEmpty()) return;
@@ -162,44 +222,61 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             }
 
             boolean changed = false;
+            String bookingUrlToSave = null;
+            Long pricePerNightToSave = null;
+            BigDecimal ratingToSave = null;
+            String photosJsonToSave = null;
+            String reviewsJsonToSave = null;
             if (bookingLink != null && !bookingLink.isBlank()
                     && !bookingLink.equals(cache.getBookingUrl())) {
                 cache.setBookingUrl(bookingLink);
+                bookingUrlToSave = bookingLink;
                 changed = true;
             }
             if (pricePerNight != null && !pricePerNight.equals(cache.getPricePerNightVnd())) {
                 cache.setPricePerNightVnd(pricePerNight);
+                pricePerNightToSave = pricePerNight;
                 changed = true;
             }
             if (h.rating() != null && !h.rating().equals(cache.getRating())) {
                 cache.setRating(h.rating());
+                ratingToSave = h.rating();
                 changed = true;
             }
 
             if (h.propertyToken() != null && !h.propertyToken().isBlank()) {
-                List<Map<String, String>> photos = serpApiClient.fetchHotelPhotos(h.propertyToken());
-                if (photos != null && !photos.isEmpty()) {
-                    try {
-                        cache.setPhotosJson(objectMapper.writeValueAsString(photos));
-                        changed = true;
-                    } catch (Exception ex) {
-                        log.warn("Failed to serialize hotel photos: {}", ex.getMessage());
+                // Ảnh/review hotel không phụ thuộc ngày — đã có trong cache thì không gọi lại (tiết kiệm quota)
+                if (cache.getPhotosJson() == null && !pastDeadline(deadline)) {
+                    List<Map<String, String>> photos = serpApiClient.fetchHotelPhotos(h.propertyToken());
+                    if (photos != null && !photos.isEmpty()) {
+                        try {
+                            photosJsonToSave = objectMapper.writeValueAsString(photos);
+                            cache.setPhotosJson(photosJsonToSave);
+                            changed = true;
+                        } catch (Exception ex) {
+                            log.warn("Failed to serialize hotel photos: {}", ex.getMessage());
+                        }
                     }
                 }
 
-                List<Map<String, Object>> reviews = serpApiClient.fetchHotelReviews(h.propertyToken());
-                if (reviews != null && !reviews.isEmpty()) {
-                    try {
-                        cache.setReviewsJson(objectMapper.writeValueAsString(reviews));
-                        changed = true;
-                    } catch (Exception ex) {
-                        log.warn("Failed to serialize hotel reviews: {}", ex.getMessage());
+                if (cache.getReviewsJson() == null && !pastDeadline(deadline)) {
+                    List<Map<String, Object>> reviews = serpApiClient.fetchHotelReviews(h.propertyToken());
+                    if (reviews != null && !reviews.isEmpty()) {
+                        try {
+                            reviewsJsonToSave = objectMapper.writeValueAsString(reviews);
+                            cache.setReviewsJson(reviewsJsonToSave);
+                            changed = true;
+                        } catch (Exception ex) {
+                            log.warn("Failed to serialize hotel reviews: {}", ex.getMessage());
+                        }
                     }
                 }
             }
 
             if (changed) {
-                placeCacheService.save(cache);
+                PlaceCache saved = placeCacheService.saveAccommodationEnrichment(cache,
+                        bookingUrlToSave, pricePerNightToSave, ratingToSave, photosJsonToSave, reviewsJsonToSave);
+                copyAccommodationEnrichment(cache, saved);
                 log.info("Hotel enrich saved: cache id={} name='{}' price={} VNĐ booking={}",
                         cache.getId(), cache.getName(), cache.getPricePerNightVnd(), cache.getBookingUrl());
             }
@@ -221,8 +298,14 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                                                 String destination,
                                                 String normalizedDestination,
                                                 GoongClient.GeocodeResult geo,
+                                                List<GeoAnchor> anchors,
+                                                Instant deadline,
                                                 String originalName) {
         try {
+            if (pastDeadline(deadline)) {
+                log.debug("SerpApi enrich skip (deadline) cho '{}'", cleanedName);
+                return new SerpEnrichOutcome(false, null);
+            }
             // AI đã được instruct để đưa city vào searchQuery, không append destination trip nữa
             // (tránh "Sân bay Nội Bài Hà Nội Đà Lạt Việt Nam" — SerpApi tìm nhầm thành phố)
             String serpQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
@@ -232,7 +315,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 return new SerpEnrichOutcome(false, LocalDateTime.now());
             }
 
-            SerpApiClient.PlaceData s = pickBestCandidate(candidates, cleanedName, normalizedDestination, geo);
+            SerpApiClient.PlaceData s = pickBestCandidate(candidates, cleanedName, normalizedDestination, geo, anchors);
             if (s == null) {
                 log.warn("SerpApi: không có candidate khớp destination='{}' cho query='{}' ({} candidates) — bỏ qua enrichment",
                         destination, serpQuery, candidates.size());
@@ -259,7 +342,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
 
             String photosId = s.dataId() != null ? s.dataId() : s.placeId();
             List<Map<String, String>> photos = List.of();
-            if (photosId != null && !photosId.isBlank()) {
+            if (photosId != null && !photosId.isBlank() && !pastDeadline(deadline)) {
                 photos = safeFetchPhotos(photosId);
             }
 
@@ -281,7 +364,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
 
             String reviewsId = s.dataId() != null ? s.dataId() : s.placeId();
             List<Map<String, Object>> reviews = List.of();
-            if (reviewsId != null && !reviewsId.isBlank()) {
+            if (reviewsId != null && !reviewsId.isBlank() && !pastDeadline(deadline)) {
                 reviews = safeFetchReviews(reviewsId);
             }
             if (reviews != null && !reviews.isEmpty()) {
@@ -323,32 +406,34 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     private SerpApiClient.PlaceData pickBestCandidate(List<SerpApiClient.PlaceData> candidates,
                                                       String cleanedName,
                                                       String normalizedDestination,
-                                                      GoongClient.GeocodeResult geo) {
+                                                      GoongClient.GeocodeResult geo,
+                                                      List<GeoAnchor> anchors) {
         if (candidates.isEmpty()) return null;
 
         String normalizedClean = normalize(cleanedName);
 
         SerpApiClient.PlaceData best = null;
         double bestScore = -1;
-        boolean bestAddressMatches = false;
+        boolean bestRegionOk = false;
 
         for (SerpApiClient.PlaceData c : candidates) {
-            boolean addressMatches = addressMatchesDestination(c.address(), normalizedDestination);
+            boolean regionOk = addressMatchesDestination(c.address(), normalizedDestination)
+                    || nearAnchor(c.latitude(), c.longitude(), anchors);
             double titleScore = titleSimilarity(normalize(c.title()), normalizedClean);
             double distanceScore = distanceScore(c, geo);
 
-            // Score: ưu tiên address match nhiều hơn title/distance
-            double score = (addressMatches ? 100.0 : 0.0) + titleScore * 10.0 + distanceScore;
+            // Score: ưu tiên đúng vùng (address match hoặc gần anchor) hơn title/distance
+            double score = (regionOk ? 100.0 : 0.0) + titleScore * 10.0 + distanceScore;
 
             if (score > bestScore) {
                 bestScore = score;
                 best = c;
-                bestAddressMatches = addressMatches;
+                bestRegionOk = regionOk;
             }
         }
 
-        // Bắt buộc address phải khớp destination, nếu destination biết được
-        if (normalizedDestination != null && !normalizedDestination.isBlank() && !bestAddressMatches) {
+        // Bắt buộc address khớp destination HOẶC GPS gần anchor, nếu destination biết được
+        if (normalizedDestination != null && !normalizedDestination.isBlank() && !bestRegionOk) {
             return null;
         }
         return best;
@@ -407,7 +492,46 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         if (normalizedDestination == null || normalizedDestination.isBlank()) return true;
         if (address == null || address.isBlank()) return false;
         String normalizedAddress = normalize(address);
-        return normalizedAddress.contains(normalizedDestination);
+        String destinationAlias = normalizeRegionAlias(normalizedDestination);
+        return normalizedAddress.contains(normalizedDestination)
+                || (destinationAlias != null && !destinationAlias.isBlank()
+                && normalizedAddress.contains(destinationAlias));
+    }
+
+    /**
+     * Validate vùng cho kết quả Goong: address chứa destination (như cũ), HOẶC cách 1 anchor
+     * ≤ ANCHOR_RADIUS_KM (cứu vùng ven: sân bay Liên Khương, thác ngoại ô...), HOẶC trùng
+     * provinceName với anchor (cứu điểm cùng tỉnh nhưng xa: Bảo Lộc cách Đà Lạt 83km).
+     * Anchors rỗng → degrade về so chuỗi địa chỉ (behavior cũ).
+     */
+    private boolean matchesRegion(String address, String provinceName, BigDecimal lat, BigDecimal lng,
+                                  String normalizedDestination, List<GeoAnchor> anchors) {
+        if (addressMatchesDestination(address, normalizedDestination)) return true;
+        if (nearAnchor(lat, lng, anchors)) return true;
+        if (provinceName != null && !provinceName.isBlank() && anchors != null) {
+            String normalizedProvince = normalizeRegionAlias(normalize(provinceName));
+            for (GeoAnchor a : anchors) {
+                if (a != null && a.provinceName() != null
+                        && normalizedProvince.equals(normalizeRegionAlias(normalize(a.provinceName())))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** True nếu (lat,lng) cách 1 anchor bất kỳ ≤ ANCHOR_RADIUS_KM. */
+    private boolean nearAnchor(BigDecimal lat, BigDecimal lng, List<GeoAnchor> anchors) {
+        if (lat == null || lng == null || anchors == null) return false;
+        for (GeoAnchor a : anchors) {
+            if (a == null || a.lat() == null || a.lng() == null) continue;
+            if (haversineKm(lat, lng, a.lat(), a.lng()) <= ANCHOR_RADIUS_KM) return true;
+        }
+        return false;
+    }
+
+    private boolean pastDeadline(Instant deadline) {
+        return deadline != null && Instant.now().isAfter(deadline);
     }
 
     private String resolveOpenState(SerpApiClient.PlaceData s) {
@@ -439,6 +563,15 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         }
     }
 
+    private void copyAccommodationEnrichment(PlaceCache target, PlaceCache source) {
+        if (target == null || source == null) return;
+        target.setBookingUrl(source.getBookingUrl());
+        target.setPricePerNightVnd(source.getPricePerNightVnd());
+        target.setRating(source.getRating());
+        target.setPhotosJson(source.getPhotosJson());
+        target.setReviewsJson(source.getReviewsJson());
+    }
+
     // ─── Private helpers ────────────────────────────────────────────────────
 
     /**
@@ -460,11 +593,126 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 .trim();
     }
 
+    private String normalizeRegionAlias(String normalizedName) {
+        if (normalizedName == null) return null;
+        String region = normalizedName
+                .replaceFirst("^(thanh pho|tp|tinh)\\s+", "")
+                .trim();
+        return switch (region) {
+            case "hcm", "tp hcm", "tphcm", "sai gon" -> "ho chi minh";
+            default -> region;
+        };
+    }
+
     private String buildPhotosJson(String thumbnailUrl) {
         try {
             return objectMapper.writeValueAsString(List.of(Map.of("url", thumbnailUrl, "thumbnail", thumbnailUrl)));
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /**
+     * Fallback khi Goong không geocode được hoặc trả kết quả sai vùng: dùng SerpApi Google Maps
+     * để lấy lat/lng + enrich. Chỉ lưu nếu candidate có GPS và khớp vùng (address/anchor).
+     */
+    private Optional<PlaceCache> resolvePlaceViaSerpApiFallback(
+            String cleanedName, String normalized, String normalizedDestination, String destination,
+            List<GeoAnchor> anchors, Instant deadline) {
+
+        if (pastDeadline(deadline)) return Optional.empty();
+
+        String serpQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
+        List<SerpApiClient.PlaceData> candidates = serpApiClient.searchPlaceCandidates(serpQuery);
+        if (candidates.isEmpty()) {
+            log.debug("SerpApi fallback: không tìm thấy '{}'", serpQuery);
+            return Optional.empty();
+        }
+
+        SerpApiClient.PlaceData best = pickBestCandidate(candidates, cleanedName, normalizedDestination, null, anchors);
+        if (best == null) {
+            log.warn("SerpApi fallback: không có candidate khớp destination='{}' cho query='{}'",
+                    destination, serpQuery);
+            return Optional.empty();
+        }
+        if (best.latitude() == null || best.longitude() == null) {
+            log.debug("SerpApi fallback: candidate '{}' không có GPS — bỏ qua", best.title());
+            return Optional.empty();
+        }
+
+        Optional<PlaceCache> existing = (normalizedDestination == null || normalizedDestination.isBlank())
+                ? placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalized)
+                : placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestination(normalized, normalizedDestination);
+
+        PlaceCache toSave = existing.orElse(new PlaceCache());
+        toSave.setNormalizedName(normalized);
+        toSave.setNormalizedDestination(normalizedDestination);
+        if (toSave.getName() == null || toSave.getName().isBlank()) toSave.setName(cleanedName);
+        toSave.setLatitude(best.latitude());
+        toSave.setLongitude(best.longitude());
+        toSave.setAddress(best.address());
+        // Tọa độ giờ là của SerpApi — clear định danh Goong cũ (vừa bị miss/reject) để row
+        // không thành "lai 2 nguồn": Activity.placeId/geocodingProvider sẽ phản ánh đúng serpapi
+        toSave.setGoongPlaceId(null);
+        toSave.setProvinceName(null);
+        toSave.setCommuneName(null);
+        toSave.setLastSyncedAt(LocalDateTime.now());
+
+        toSave.setSerpDataId(best.dataId());
+        toSave.setSerpPlaceId(best.placeId());
+        toSave.setSerpTitle(best.title());
+        toSave.setPlaceType(best.type());
+        toSave.setRating(best.rating());
+        toSave.setReviewCount(best.reviewCount());
+        toSave.setOpeningHoursJson(best.operatingHoursJson());
+        toSave.setOpenState(resolveOpenState(best));
+        String hoursText = best.hours();
+        if (hoursText == null && best.openState() != null && !best.openState().isBlank()) {
+            String raw = best.openState();
+            hoursText = raw.length() > 255 ? raw.substring(0, 255) : raw;
+        }
+        toSave.setHoursText(hoursText);
+        toSave.setPhone(best.phone());
+        toSave.setWebsite(best.website());
+
+        String dataId = best.dataId() != null ? best.dataId() : best.placeId();
+        if (dataId != null && !dataId.isBlank() && !pastDeadline(deadline)) {
+            List<Map<String, String>> photos = safeFetchPhotos(dataId);
+            if (!photos.isEmpty()) {
+                try { toSave.setPhotosJson(objectMapper.writeValueAsString(photos)); }
+                catch (Exception ex) { log.warn("SerpApi fallback: serialize photos failed: {}", ex.getMessage()); }
+            }
+            if (toSave.getPhotosJson() == null && best.thumbnailUrl() != null) {
+                toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
+            }
+
+            List<Map<String, Object>> reviews = pastDeadline(deadline) ? List.of() : safeFetchReviews(dataId);
+            if (!reviews.isEmpty()) {
+                try { toSave.setReviewsJson(objectMapper.writeValueAsString(reviews)); }
+                catch (Exception ex) { log.warn("SerpApi fallback: serialize reviews failed: {}", ex.getMessage()); }
+            }
+        } else if (best.thumbnailUrl() != null) {
+            toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
+        }
+
+        boolean hasBasic = best.rating() != null || best.reviewCount() != null
+                || best.phone() != null || best.website() != null;
+        boolean hasPhotos = toSave.getPhotosJson() != null;
+        boolean hasOpeningHours = best.operatingHoursJson() != null || best.hours() != null || best.openState() != null;
+        boolean hasReviews = toSave.getReviewsJson() != null;
+        toSave.setSerpEnriched(hasBasic && hasPhotos && (hasOpeningHours || hasReviews));
+        toSave.setSerpSyncedAt(LocalDateTime.now());
+
+        log.info("SerpApi fallback resolved (Goong miss): name='{}' lat={} lng={} rating={} serpEnriched={}",
+                cleanedName, best.latitude(), best.longitude(), best.rating(), toSave.isSerpEnriched());
+
+        try {
+            return Optional.of(placeCacheService.save(toSave));
+        } catch (DataIntegrityViolationException ex) {
+            log.warn("SerpApi fallback: duplicate on save for '{}' — refetching", normalized);
+            return (normalizedDestination == null || normalizedDestination.isBlank())
+                    ? placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalized)
+                    : placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestination(normalized, normalizedDestination);
         }
     }
 }

@@ -27,6 +27,13 @@ public class AiItineraryValidator {
     /** Sàn tolerance tuyệt đối: budget nhỏ vẫn được hở 1 triệu VNĐ thay vì bị 10% siết quá chặt. */
     private static final long BUDGET_TOLERANCE_FLOOR_VND = 1_000_000L;
 
+    /**
+     * Số hoạt động tối thiểu mỗi ngày — sàn an toàn bắt ngày "rỗng nội dung".
+     * Prompt yêu cầu 5-7; giữ sàn thấp (3) để không tốn lượt retry (maxRetries=1) cho
+     * ngày đi/về thưa hợp lệ, chỉ chặn trường hợp lịch trình quá sơ sài.
+     */
+    private static final int MIN_ACTIVITIES_PER_DAY = 3;
+
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm");
 
     private static final Set<String> ALLOWED_TYPES = Set.of(
@@ -54,9 +61,39 @@ public class AiItineraryValidator {
     public void validate(AiItineraryResult result, GenerateTripRequest request) {
         if (result == null) throw badAi("AI không trả về lịch trình");
 
+        validateTitle(result, request);
         validateDays(result, request);
         long totalCost = validateActivitiesAndComputeCost(result);
         validateBudget(totalCost, request);
+        validateChecklist(result);
+    }
+
+    /** #3: title phải có và nhắc đến điểm đến (đóng bug "title không khớp input"). */
+    private void validateTitle(AiItineraryResult result, GenerateTripRequest request) {
+        String title = result.getTitle();
+        if (title == null || title.isBlank()) {
+            throw badAi("thiếu title");
+        }
+        String destination = request.getDestination();
+        if (destination == null || destination.isBlank()) return; // không có gì để đối chiếu
+        // Bỏ phần tỉnh sau dấu phẩy: "Đà Lạt, Lâm Đồng" -> "Đà Lạt".
+        String core = destination.split(",")[0];
+        if (!normalize(title).contains(normalize(core))) {
+            throw badAi(String.format("title '%s' không nhắc đến điểm đến '%s'", title, core.trim()));
+        }
+    }
+
+    /** #5: checklist là bắt buộc theo prompt — chặn việc AI bỏ qua. */
+    private void validateChecklist(AiItineraryResult result) {
+        List<AiItineraryResult.AiChecklistItem> checklist = result.getChecklist();
+        if (checklist == null || checklist.isEmpty()) {
+            throw badAi("thiếu checklist chuẩn bị đồ");
+        }
+        for (AiItineraryResult.AiChecklistItem item : checklist) {
+            if (item.getName() == null || item.getName().isBlank()) {
+                throw badAi("checklist có mục thiếu name");
+            }
+        }
     }
 
     private void validateDays(AiItineraryResult result, GenerateTripRequest request) {
@@ -97,6 +134,10 @@ public class AiItineraryValidator {
             List<AiItineraryResult.AiActivity> activities = day.getActivities();
             if (activities == null || activities.isEmpty()) {
                 throw badAi("Ngày " + day.getDayNumber() + " không có hoạt động");
+            }
+            if (activities.size() < MIN_ACTIVITIES_PER_DAY) {
+                throw badAi(String.format("Ngày %d chỉ có %d hoạt động, cần tối thiểu %d",
+                        day.getDayNumber(), activities.size(), MIN_ACTIVITIES_PER_DAY));
             }
 
             for (AiItineraryResult.AiActivity activity : activities) {
