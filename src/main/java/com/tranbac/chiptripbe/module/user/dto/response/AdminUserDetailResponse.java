@@ -29,6 +29,7 @@ public class AdminUserDetailResponse {
     private List<TripSummary> trips;
     private AiUsageSummary aiUsage;
     private long activeSessionCount;
+    private PaymentSummary payment;
 
     @Getter
     @Builder
@@ -52,5 +53,30 @@ public class AdminUserDetailResponse {
         private long totalTokensIn;
         private long totalTokensOut;
         private BigDecimal totalCostUsd;
+    }
+
+    @Getter
+    @Builder
+    public static class PaymentSummary {
+        /** true nếu user có ≥1 đơn đã thanh toán (PAID). */
+        private boolean premium;
+        private long paidOrderCount;
+        private long totalSpentVnd;
+        private long totalCreditsPurchased;
+        private LocalDateTime lastPaidAt;
+        private List<OrderItem> orders;
+    }
+
+    @Getter
+    @Builder
+    public static class OrderItem {
+        private Long id;
+        private String orderCode;
+        private String planCode;
+        private Long amountVnd;
+        private Integer credits;
+        private String status;
+        private LocalDateTime createdAt;
+        private LocalDateTime paidAt;
     }
 }

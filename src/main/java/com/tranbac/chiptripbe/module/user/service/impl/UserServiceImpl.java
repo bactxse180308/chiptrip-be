@@ -7,6 +7,9 @@ import com.tranbac.chiptripbe.module.auth.entity.EmailVerificationToken;
 import com.tranbac.chiptripbe.module.auth.entity.RefreshToken;
 import com.tranbac.chiptripbe.module.auth.repository.EmailVerificationTokenRepository;
 import com.tranbac.chiptripbe.module.auth.repository.RefreshTokenRepository;
+import com.tranbac.chiptripbe.module.payment.entity.OrderStatus;
+import com.tranbac.chiptripbe.module.payment.entity.PaymentOrder;
+import com.tranbac.chiptripbe.module.payment.repository.PaymentOrderRepository;
 import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.user.dto.request.*;
@@ -46,6 +49,7 @@ class UserServiceImpl implements UserService {
     private final RefreshTokenRepository refreshTokenRepository;
     private final TripRepository tripRepository;
     private final AiUsageRepository aiUsageRepository;
+    private final PaymentOrderRepository paymentOrderRepository;
     private final PasswordEncoder passwordEncoder;
     private final EmailService emailService;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
@@ -108,15 +112,18 @@ class UserServiceImpl implements UserService {
 
         List<Trip> trips = tripRepository.findByUserId(userId, Pageable.unpaged()).getContent();
 
-        Object[] aiStats = aiUsageRepository.aggregateByUserId(userId);
+        List<Object[]> aiStatsRows = aiUsageRepository.aggregateByUserId(userId);
+        Object[] aiStats = aiStatsRows.isEmpty() ? new Object[0] : aiStatsRows.get(0);
         AdminUserDetailResponse.AiUsageSummary aiSummary = AdminUserDetailResponse.AiUsageSummary.builder()
-                .totalCount(((Number) aiStats[0]).longValue())
-                .totalTokensIn(((Number) aiStats[1]).longValue())
-                .totalTokensOut(((Number) aiStats[2]).longValue())
-                .totalCostUsd((BigDecimal) aiStats[3])
+                .totalCount(numberAt(aiStats, 0))
+                .totalTokensIn(numberAt(aiStats, 1))
+                .totalTokensOut(numberAt(aiStats, 2))
+                .totalCostUsd(decimalAt(aiStats, 3))
                 .build();
 
         long activeSessions = refreshTokenRepository.countByUserIdAndRevokedFalse(userId);
+
+        AdminUserDetailResponse.PaymentSummary paymentSummary = buildPaymentSummary(userId);
 
         return AdminUserDetailResponse.builder()
                 .id(user.getId())
@@ -144,7 +151,52 @@ class UserServiceImpl implements UserService {
                         .build()).toList())
                 .aiUsage(aiSummary)
                 .activeSessionCount(activeSessions)
+                .payment(paymentSummary)
                 .build();
+    }
+
+    private AdminUserDetailResponse.PaymentSummary buildPaymentSummary(Long userId) {
+        List<PaymentOrder> orders = paymentOrderRepository.findByUserIdOrderByCreatedAtDesc(userId);
+        List<PaymentOrder> paidOrders = orders.stream()
+                .filter(o -> o.getStatus() == OrderStatus.PAID)
+                .toList();
+
+        return AdminUserDetailResponse.PaymentSummary.builder()
+                .premium(!paidOrders.isEmpty())
+                .paidOrderCount(paidOrders.size())
+                .totalSpentVnd(paidOrders.stream().mapToLong(PaymentOrder::getAmountVnd).sum())
+                .totalCreditsPurchased(paidOrders.stream()
+                        .mapToLong(o -> o.getCredits() == null ? 0L : o.getCredits()).sum())
+                .lastPaidAt(paidOrders.stream()
+                        .map(PaymentOrder::getPaidAt)
+                        .filter(java.util.Objects::nonNull)
+                        .max(LocalDateTime::compareTo)
+                        .orElse(null))
+                .orders(orders.stream().map(o -> AdminUserDetailResponse.OrderItem.builder()
+                        .id(o.getId())
+                        .orderCode(o.getOrderCode())
+                        .planCode(o.getPlanCode())
+                        .amountVnd(o.getAmountVnd())
+                        .credits(o.getCredits())
+                        .status(o.getStatus().name())
+                        .createdAt(o.getCreatedAt())
+                        .paidAt(o.getPaidAt())
+                        .build()).toList())
+                .build();
+    }
+
+    private long numberAt(Object[] row, int index) {
+        Object value = aggregateValueAt(row, index);
+        return value == null ? 0L : ((Number) value).longValue();
+    }
+
+    private BigDecimal decimalAt(Object[] row, int index) {
+        Object value = aggregateValueAt(row, index);
+        return value == null ? BigDecimal.ZERO : new BigDecimal(value.toString());
+    }
+
+    private Object aggregateValueAt(Object[] row, int index) {
+        return row.length > index ? row[index] : null;
     }
 
     @Override

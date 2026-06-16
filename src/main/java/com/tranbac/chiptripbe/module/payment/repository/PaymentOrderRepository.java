@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 public interface PaymentOrderRepository extends JpaRepository<PaymentOrder, Long> {
@@ -15,6 +16,9 @@ public interface PaymentOrderRepository extends JpaRepository<PaymentOrder, Long
     Optional<PaymentOrder> findByOrderCode(String orderCode);
 
     Optional<PaymentOrder> findByIdAndUserId(Long id, Long userId);
+
+    /** Toàn bộ đơn của 1 user, mới nhất trước — dùng cho trang chi tiết user (admin). */
+    List<PaymentOrder> findByUserIdOrderByCreatedAtDesc(Long userId);
 
     boolean existsByOrderCode(String orderCode);
 

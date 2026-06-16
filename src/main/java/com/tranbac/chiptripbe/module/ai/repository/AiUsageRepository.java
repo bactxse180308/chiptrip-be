@@ -18,7 +18,7 @@ public interface AiUsageRepository extends JpaRepository<AiUsage, Long>, JpaSpec
 
     @Query("SELECT COUNT(a), COALESCE(SUM(a.tokensIn), 0), COALESCE(SUM(a.tokensOut), 0), COALESCE(SUM(a.costUsd), 0) " +
            "FROM AiUsage a WHERE a.user.id = :userId")
-    Object[] aggregateByUserId(@Param("userId") Long userId);
+    List<Object[]> aggregateByUserId(@Param("userId") Long userId);
 
     @Query("SELECT a.provider, YEAR(a.createdAt), MONTH(a.createdAt), COUNT(a), " +
            "SUM(a.tokensIn), SUM(a.tokensOut), SUM(a.costUsd) " +
