@@ -36,9 +36,11 @@ public class User extends BaseAuditEntity {
     @Column(name = "avatar_url", length = 500)
     private String avatarUrl;
 
+    // Paid credit mặc định = 0 → user mới là Normal (chỉ có 1 trial/ngày). KHÔNG để 3 nữa,
+    // vì premium suy ra từ aiCreditUnits>0 → mặc định 3 sẽ biến user mới thành Premium oan.
     @Column(name = "ai_credits", nullable = false)
     @Builder.Default
-    private Integer aiCredits = 3;
+    private Integer aiCredits = 0;
 
     @Column(name = "ai_credit_units")
     private Integer aiCreditUnits;

@@ -5,6 +5,7 @@ import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
 import com.tranbac.chiptripbe.module.trip.service.TripExportService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
+import com.tranbac.chiptripbe.module.user.service.EntitlementService;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,6 +29,7 @@ class TripExportServiceImpl implements TripExportService {
     private static final String FONT_FAMILY = "DejaVu Sans";
 
     private final TripService tripService;
+    private final EntitlementService entitlementService;
 
     private byte[] fontBytes;
 
@@ -44,9 +46,11 @@ class TripExportServiceImpl implements TripExportService {
     public byte[] exportPdf(Long userId, Long tripId) {
         // getTripDetail đã kiểm tra quyền sở hữu (forbidden nếu không phải owner)
         TripDetailResponse trip = tripService.getTripDetail(userId, tripId);
-        // Gate theo snapshot lúc tạo, KHÔNG theo paid hiện tại → mua 1 credit, generate (paid→0)
-        // vẫn export được chuyến đó (tránh "cliff"). CREDIT_PREMIUM_SPEC.md Mục 5.7.
-        if (!trip.isCreatedAsPremium()) {
+        // Gate "createdAsPremium HOẶC premium hiện tại":
+        // - createdAsPremium (snapshot) → không cliff: mua 1 credit, generate (paid→0) vẫn export được.
+        // - isPremium hiện tại → nạp gói rồi thì export được cả chuyến tạo lúc còn Normal.
+        // PDF không tốn credit → mở khoá không trừ gì.
+        if (!trip.isCreatedAsPremium() && !entitlementService.isPremium(userId)) {
             throw AppException.premiumRequired();   // 403 PREMIUM_REQUIRED
         }
         String html = buildHtml(trip);

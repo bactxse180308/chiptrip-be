@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -81,6 +82,8 @@ class ActivityAlternativeServiceImplTest {
                 new com.tranbac.chiptripbe.common.config.AiProperties(),
                 new ObjectMapper(),
                 aiUsageService);
+        // Mặc định coi user là Premium để các test khác qua được gate; test gate sẽ override.
+        when(entitlementService.isPremium(USER_ID)).thenReturn(true);
     }
 
     @Test
@@ -112,6 +115,20 @@ class ActivityAlternativeServiceImplTest {
         assertEquals(25, response.getChargedUnits());
         assertEquals(4, trip.getActivitySwapFreeUsed());
         verify(userRepository).deductCreditUnitsIfAvailable(USER_ID, 25);
+    }
+
+    @Test
+    void replaceActivity_freeQuotaExhaustedAndNoPaid_throwsInsufficientPaid() throws Exception {
+        Trip trip = trip(4, 4);
+        Activity activity = activity(trip);
+        stubReplaceGraph(trip, activity, sessionJson());
+        when(userRepository.deductCreditUnitsIfAvailable(USER_ID, 25)).thenReturn(0);
+
+        AppException ex = assertThrows(AppException.class,
+                () -> service.replaceActivity(USER_ID, TRIP_ID, DAY_ID, ACTIVITY_ID, replaceRequest()));
+
+        assertEquals("INSUFFICIENT_PAID_CREDITS", ex.getCode());
+        verify(activityRepository, never()).saveAll(any());
     }
 
     @Test
@@ -234,8 +251,11 @@ class ActivityAlternativeServiceImplTest {
     }
 
     @Test
-    void createAlternatives_normalUser_throwsPremiumRequiredBeforeAiCall() {
-        doThrow(AppException.premiumRequired()).when(entitlementService).requirePremium(USER_ID);
+    void createAlternatives_normalTripAndNotPremium_throwsPremiumRequiredBeforeAiCall() {
+        Trip trip = trip(0, 0);                       // generatedAsPremium=false (chuyến tạo lúc Normal)
+        Activity current = activity(trip);
+        stubCreateGraph(trip, current, List.of(current));
+        when(entitlementService.isPremium(USER_ID)).thenReturn(false);   // chưa nạp gói
 
         AppException ex = assertThrows(AppException.class, () -> service.createAlternatives(
                 USER_ID, TRIP_ID, DAY_ID, ACTIVITY_ID, alternativesRequest(ActivityAlternativeCategory.RESTAURANT)));
@@ -243,6 +263,19 @@ class ActivityAlternativeServiceImplTest {
         assertEquals("PREMIUM_REQUIRED", ex.getCode());
         verify(sessionRepository, never()).save(any());
         verify(aiUsageService, never()).recordUsage(any(), any(), anyInt(), anyInt());
+    }
+
+    @Test
+    void createAlternatives_normalTripButPremiumUser_passesGate() {
+        // Nạp gói rồi → đổi được cả chuyến tạo lúc còn Normal (gate qua nhờ isPremium).
+        Trip trip = trip(0, 0);
+        Activity current = activity(trip);
+        stubCreateGraph(trip, current, List.of(current));
+        // isPremium=true từ setUp. Dừng sớm bằng category SAME_TYPE để khỏi gọi AI thật.
+        AppException ex = assertThrows(AppException.class, () -> service.createAlternatives(
+                USER_ID, TRIP_ID, DAY_ID, ACTIVITY_ID, alternativesRequest(ActivityAlternativeCategory.SAME_TYPE)));
+        // Đã qua gate Premium (lỗi do category, KHÔNG phải PREMIUM_REQUIRED).
+        assertNotEquals("PREMIUM_REQUIRED", ex.getCode());
     }
 
     private void stubReplaceGraph(Trip trip, Activity activity, String optionsJson) {

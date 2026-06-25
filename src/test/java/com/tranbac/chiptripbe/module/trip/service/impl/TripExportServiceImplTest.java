@@ -3,6 +3,7 @@ package com.tranbac.chiptripbe.module.trip.service.impl;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
+import com.tranbac.chiptripbe.module.user.service.EntitlementService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -21,13 +22,15 @@ class TripExportServiceImplTest {
     private static final Long TRIP_ID = 9L;
 
     @Mock private TripService tripService;
+    @Mock private EntitlementService entitlementService;
 
     @InjectMocks private TripExportServiceImpl exportService;
 
     @Test
-    void exportPdf_normalTrip_throwsPremiumRequired() {
+    void exportPdf_normalTripAndNotPremium_throwsPremiumRequired() {
         when(tripService.getTripDetail(USER_ID, TRIP_ID))
                 .thenReturn(TripDetailResponse.builder().id(TRIP_ID).createdAsPremium(false).build());
+        when(entitlementService.isPremium(USER_ID)).thenReturn(false);
 
         AppException ex = assertThrows(AppException.class, () -> exportService.exportPdf(USER_ID, TRIP_ID));
 
