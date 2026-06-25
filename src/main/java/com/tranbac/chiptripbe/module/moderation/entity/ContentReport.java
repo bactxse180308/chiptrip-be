@@ -3,6 +3,7 @@ package com.tranbac.chiptripbe.module.moderation.entity;
 import com.tranbac.chiptripbe.common.entity.BaseEntity;
 import com.tranbac.chiptripbe.module.moderation.enums.ReportStatus;
 import com.tranbac.chiptripbe.module.moderation.enums.ReportTargetType;
+import com.tranbac.chiptripbe.module.user.entity.User;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.Nationalized;
@@ -25,6 +26,11 @@ public class ContentReport extends BaseEntity {
     @Column(name = "reporter_user_id", nullable = false)
     private Long reporterUserId;
 
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "reporter_user_id", nullable = false, insertable = false, updatable = false,
+            foreignKey = @ForeignKey(name = "fk_content_reports_reporter"))
+    private User reporter;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "target_type", nullable = false, length = 20)
     private ReportTargetType targetType;
@@ -44,6 +50,11 @@ public class ContentReport extends BaseEntity {
 
     @Column(name = "resolved_by_admin_id")
     private Long resolvedByAdminId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "resolved_by_admin_id", insertable = false, updatable = false,
+            foreignKey = @ForeignKey(name = "fk_content_reports_resolved_by_admin"))
+    private User resolvedByAdmin;
 
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "DATETIME2")
     private LocalDateTime createdAt;

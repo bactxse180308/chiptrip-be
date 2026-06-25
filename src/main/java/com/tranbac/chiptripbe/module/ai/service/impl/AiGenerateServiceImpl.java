@@ -117,7 +117,7 @@ class AiGenerateServiceImpl implements AiService {
                 - Phân bổ chi phí hợp lý, tổng không vượt ngân sách.
                 - costVnd của mỗi hoạt động là TỔNG chi phí khoản đó cho CẢ NHÓM (mọi thành viên), không phải chi phí mỗi người.
                 - type phải là một trong: FOOD, ATTRACTION, TRANSPORT, ACCOMMODATION, OTHER.
-                - category trong checklist phải là một trong: PAPERS, CLOTHES, HYGIENE, OTHER.
+                - category trong checklist phải là một trong: PAPERS, CLOTHES, HYGIENE, ELECTRONICS, MEDICINE, OTHER.
                 - title BẮT BUỘC chứa đúng tên điểm đến và số ngày của chuyến đi.
                   Ví dụ đúng: "Hành trình Đà Lạt 3 ngày 2 đêm".
                 - Mỗi ngày nên có 5-7 hoạt động, không nhồi quá nhiều, để lịch trình thực tế và khả thi.
@@ -146,15 +146,13 @@ class AiGenerateServiceImpl implements AiService {
                     }
                   ],
                   "checklist": [
-                    { "category": "PAPERS|CLOTHES|HYGIENE|OTHER", "name": "string" }
+                    { "category": "PAPERS|CLOTHES|HYGIENE|ELECTRONICS|MEDICINE|OTHER", "name": "string" }
                   ]
                 }
                 """;
 
         long numDays = java.time.temporal.ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + 1;
-        String stylesText = (request.getStyles() != null && !request.getStyles().isEmpty())
-                ? String.join(", ", request.getStyles())
-                : "không có yêu cầu đặc biệt";
+        String stylesText = formatStyleTags(request.getStyles());
         int peopleCount = (request.getPeopleCount() != null && request.getPeopleCount() > 0)
                 ? request.getPeopleCount() : 1;
         long budgetPerPerson = request.getBudgetVnd() / peopleCount;
@@ -184,7 +182,14 @@ class AiGenerateServiceImpl implements AiService {
                 - Ít nhất 2 ATTRACTION mỗi ngày.
                 - Trước khi trả JSON, tự kiểm tra mọi searchQuery của FOOD/ATTRACTION/ACCOMMODATION/TRANSPORT:
                   phải là tên địa điểm có thể copy vào Google Maps/Goong để tìm đúng ngay, không phải câu mô tả hoạt động.
-                - Bao gồm checklist chuẩn bị đồ cho chuyến đi (%d người, %d ngày).
+                - Bao gồm checklist chuẩn bị đồ cho chuyến đi (%d người, %d ngày), tối thiểu 12 mục, không trùng tên.
+                - Checklist phải có nhóm cơ bản: giấy tờ, quần áo theo số ngày, vệ sinh cá nhân, sạc/pin dự phòng, thuốc/y tế.
+                - Checklist phải bám Phong cách và điểm đến:
+                  + beach/resort/biển/đảo/lặn biển: thêm đồ bơi, khăn biển, túi chống nước, kính râm hoặc kính bơi, kem chống nắng.
+                  + mountain/adventure/núi/trekking/cắm trại/săn mây: thêm giày trekking, áo khoác gió hoặc áo mưa, thuốc chống côn trùng, balo nhỏ.
+                  + photo/check-in/sống ảo: thêm máy ảnh/gimbal/tripod, outfit chụp ảnh, pin dự phòng.
+                  + food/food_tour: thêm men tiêu hóa hoặc thuốc đau bụng.
+                  + family/trẻ em: thêm giấy tờ trẻ em, thuốc cơ bản, khăn ướt.
                 """,
                 request.getDeparture(),
                 request.getDestination(),
@@ -225,6 +230,40 @@ class AiGenerateServiceImpl implements AiService {
     }
 
     /**
+     * Đổi style user chọn khi generate trip thành mô tả tiếng Việt để AI hiểu đúng
+     * thay vì chỉ thấy tag kỹ thuật như "photo", "resort", "family".
+     */
+    private String formatStyleTags(List<String> styles) {
+        if (styles == null || styles.isEmpty()) return "không có yêu cầu đặc biệt";
+        Map<String, String> labels = Map.ofEntries(
+                Map.entry("healing", "nghỉ dưỡng, chữa lành, thư giãn"),
+                Map.entry("food", "food tour, ăn đặc sản địa phương"),
+                Map.entry("food_tour", "food tour, ăn đặc sản địa phương"),
+                Map.entry("photo", "check-in sống ảo, địa điểm chụp ảnh đẹp"),
+                Map.entry("checkin", "check-in sống ảo, địa điểm chụp ảnh đẹp"),
+                Map.entry("check-in", "check-in sống ảo, địa điểm chụp ảnh đẹp"),
+                Map.entry("adventure", "mạo hiểm, leo núi, trekking, lặn biển"),
+                Map.entry("beach", "đi biển, đảo, tắm biển, lặn ngắm san hô"),
+                Map.entry("mountain", "đi núi, trekking, săn mây, cắm trại"),
+                Map.entry("resort", "resort, chill, hồ bơi, view biển"),
+                Map.entry("family", "gia đình, an toàn, có trẻ em"),
+                Map.entry("couple", "couple, hẹn hò, lãng mạn, riêng tư"),
+                Map.entry("nightlife", "nightlife, bar, club, phố đêm"),
+                Map.entry("culture", "văn hóa, lịch sử, di tích, bảo tàng"),
+                Map.entry("local", "trải nghiệm local, sống như người địa phương"),
+                Map.entry("luxury", "sang chảnh, khách sạn tốt, fine dining"),
+                Map.entry("group", "bạn bè hoặc nhóm, vui, sôi động")
+        );
+        String text = styles.stream()
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(tag -> labels.getOrDefault(tag.toLowerCase(), tag))
+                .distinct()
+                .collect(java.util.stream.Collectors.joining("; "));
+        return text.isEmpty() ? "không có yêu cầu đặc biệt" : text;
+    }
+
+    /**
      * Đổi tag preferences ("healing,food,photo,adventure" — lưu từ Profile FE)
      * thành mô tả tiếng Việt cho prompt. Tag lạ giữ nguyên. Trả null nếu trống.
      */
@@ -234,7 +273,9 @@ class AiGenerateServiceImpl implements AiService {
                 "healing", "chữa lành, thư giãn nhẹ nhàng",
                 "food", "ẩm thực, ăn uống đặc sản",
                 "photo", "sống ảo, địa điểm chụp ảnh đẹp",
-                "adventure", "mạo hiểm, trải nghiệm cảm giác mạnh"
+                "adventure", "mạo hiểm, trải nghiệm cảm giác mạnh",
+                "beach", "đi biển, đảo, tắm biển, lặn ngắm san hô",
+                "mountain", "đi núi, trekking, săn mây"
         );
         String text = java.util.Arrays.stream(userPreferences.split(","))
                 .map(String::trim)

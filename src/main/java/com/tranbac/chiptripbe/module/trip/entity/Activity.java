@@ -2,6 +2,7 @@ package com.tranbac.chiptripbe.module.trip.entity;
 
 import com.tranbac.chiptripbe.common.entity.BaseEntity;
 import com.tranbac.chiptripbe.common.enums.ActivityType;
+import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.Nationalized;
@@ -74,4 +75,9 @@ public class Activity extends BaseEntity {
     /** FK sang place_cache.id — null nếu không geocode được */
     @Column(name = "place_cache_id")
     private Long placeCacheId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "place_cache_id", insertable = false, updatable = false,
+            foreignKey = @ForeignKey(name = "fk_activities_place_cache"))
+    private PlaceCache placeCache;
 }

@@ -1,10 +1,12 @@
 package com.tranbac.chiptripbe.module.trip.repository;
 
 import com.tranbac.chiptripbe.module.trip.entity.Trip;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -22,6 +24,10 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
     Optional<Trip> findByInviteToken(String inviteToken);
 
     Optional<Trip> findByIdAndUserId(Long id, Long userId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT t FROM Trip t WHERE t.id = :tripId AND t.user.id = :userId")
+    Optional<Trip> findByIdAndUserIdForUpdate(@Param("tripId") Long tripId, @Param("userId") Long userId);
 
     List<Trip> findByDateStart(java.time.LocalDate dateStart);
 

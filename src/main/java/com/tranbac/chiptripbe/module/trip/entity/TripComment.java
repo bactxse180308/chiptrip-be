@@ -28,6 +28,11 @@ public class TripComment extends BaseEntity {
     @Column(name = "trip_id", nullable = false)
     private Long tripId;
 
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "trip_id", nullable = false, insertable = false, updatable = false,
+            foreignKey = @ForeignKey(name = "fk_trip_comments_trip"))
+    private Trip trip;
+
     /**
      * FK NO ACTION tới users — giả định user chỉ bị soft-delete (isActive=false,
      * xem UserServiceImpl DELETE /users/me). Nếu sau này có hard-delete user,

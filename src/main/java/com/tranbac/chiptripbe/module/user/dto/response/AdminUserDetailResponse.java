@@ -18,6 +18,8 @@ public class AdminUserDetailResponse {
     private String fullName;
     private String avatarUrl;
     private Integer aiCredits;
+    private Integer aiCreditUnits;
+    private BigDecimal aiCreditBalance;
     private Boolean isActive;
     private Boolean emailVerified;
     private String role;

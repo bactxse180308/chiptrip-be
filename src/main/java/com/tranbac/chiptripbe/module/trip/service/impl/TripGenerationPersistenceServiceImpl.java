@@ -26,7 +26,9 @@ import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.trip.service.TripGenerationPersistenceService;
 import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.user.entity.User;
+import com.tranbac.chiptripbe.module.user.enums.CreditSource;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
+import com.tranbac.chiptripbe.module.user.service.CreditService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
@@ -57,6 +59,7 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
     private final ObjectMapper objectMapper;
     private final TripMemberService tripMemberService;
     private final ApplicationEventPublisher eventPublisher;
+    private final CreditService creditService;
 
     @Override
     @Transactional
@@ -74,27 +77,32 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
 
         List<TripGenerateResponse.DayDetail> dayDetails = new ArrayList<>();
         long totalCost = 0;
+        int geocodeFailedCount = 0;
         for (AiItineraryResult.AiDay aiDay : itinerary.getDays()) {
             DayResult dr = persistDay(trip, aiDay, request, resolvedPlaces);
             dayDetails.add(dr.detail);
             totalCost += dr.dayCost;
+            geocodeFailedCount += dr.geocodeFailed;
         }
 
         List<TripGenerateResponse.ChecklistDetail> checklistDetails = persistChecklist(trip, itinerary);
 
         // Log AiUsage TRƯỚC khi trừ credit — vì @Modifying(clearAutomatically=true) sẽ detach context.
-        // Nếu deduct fail (return 0), throw ném ra rollback toàn bộ tx → AiUsage cũng rollback.
+        // Nếu consume fail (throw), rollback toàn bộ tx → AiUsage cũng rollback (user không mất lượt).
         logAiUsage(user, trip, aiResult);
 
-        // Trừ credit atomic — chống lost update khi 2 generate request chạy song song
-        int updated = userRepository.deductCreditIfAvailable(userId);
-        if (updated == 0) {
-            throw AppException.badRequest("Hết lượt AI. Vui lòng mua thêm credits.");
-        }
+        // Trừ credit atomic, paid-trước-trial-sau (re-check trong tx persist, chống race với
+        // generate song song). Throw 402 nếu hết sạch → rollback cả trip. CREDIT_PREMIUM_SPEC.md 5.5.
+        CreditSource src = creditService.consumeForGenerate(userId);
 
         // Sau clearAutomatically, persistence context đã clear → query lại để có số mới
-        Integer remainingCredits = userRepository.findAiCreditsById(userId);
-        if (remainingCredits != null && remainingCredits <= 1) {
+        Integer remainingUnits = userRepository.findAiCreditUnitsById(userId);
+        if (remainingUnits != null) {
+            userRepository.syncWholeCredits(userId, Math.max(0, remainingUnits / 100));
+        }
+        // Low-credit event CHỈ khi tiêu PAID và paid còn lại thấp (trial hết không cảnh báo nạp).
+        if (src == CreditSource.PAID && remainingUnits != null && remainingUnits <= 100) {
+            int remainingCredits = (int) Math.ceil(remainingUnits / 100.0);
             eventPublisher.publishEvent(new AiCreditsLowEvent(userId, remainingCredits));
         }
 
@@ -114,6 +122,7 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                 .styles(trip.getStyles())
                 .createdAt(trip.getCreatedAt())
                 .totalCostVnd(totalCost)
+                .geocodeFailedCount(geocodeFailedCount)
                 .days(dayDetails)
                 .checklist(checklistDetails)
                 .build();
@@ -134,6 +143,9 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                 + (ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + 1)
                 + " ngày";
 
+        // Snapshot quyền lên trip: premium suy ra từ paid balance (không dùng ROLE_PREMIUM).
+        boolean premiumTrip = user.isPremium();
+
         Trip trip = Trip.builder()
                 .user(user)
                 .title(title)
@@ -144,11 +156,14 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                 .peopleCount(request.getPeopleCount())
                 .budgetVnd(request.getBudgetVnd())
                 .styles(stylesJson)
+                .generatedAsPremium(premiumTrip)
+                .activitySwapFreeLimit(premiumTrip ? 4 : 0)
+                .activitySwapFreeUsed(0)
                 .build();
         return tripRepository.save(trip);
     }
 
-    private record DayResult(TripGenerateResponse.DayDetail detail, long dayCost) {}
+    private record DayResult(TripGenerateResponse.DayDetail detail, long dayCost, int geocodeFailed) {}
 
     private DayResult persistDay(Trip trip,
                                  AiItineraryResult.AiDay aiDay,
@@ -171,6 +186,7 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
         List<TripGenerateResponse.ActivityDetail> activityDetails = new ArrayList<>();
         long dayCost = 0;
         int order = 1;
+        int geocodeFailed = 0;
 
         for (AiItineraryResult.AiActivity aiActivity : aiDay.getActivities()) {
             LocalTime startTime;
@@ -182,6 +198,12 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
 
             ActivityType activityType = parseActivityType(aiActivity.getType());
             PlaceCache p = resolvedPlaces != null ? resolvedPlaces.get(aiActivity) : null;
+
+            // Activity geocodable (có searchQuery) nhưng không resolve được tọa độ → đếm để cảnh báo FE
+            if (p == null && shouldGeocode(activityType)
+                    && aiActivity.getSearchQuery() != null && !aiActivity.getSearchQuery().isBlank()) {
+                geocodeFailed++;
+            }
 
             long cost = aiActivity.getCostVnd() != null ? Math.max(0, aiActivity.getCostVnd()) : 0L;
             if (p != null && p.getPricePerNightVnd() != null && activityType == ActivityType.ACCOMMODATION) {
@@ -229,7 +251,19 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                 .dayCostVnd(dayCost)
                 .activities(activityDetails)
                 .build();
-        return new DayResult(detail, dayCost);
+        return new DayResult(detail, dayCost, geocodeFailed);
+    }
+
+    private boolean shouldGeocode(ActivityType type) {
+        return type == ActivityType.FOOD
+                || type == ActivityType.ATTRACTION
+                || type == ActivityType.ACCOMMODATION
+                || type == ActivityType.TRANSPORT;
+    }
+
+    private static String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) return value;
+        return value.substring(0, maxLength);
     }
 
     private List<TripGenerateResponse.ChecklistDetail> persistChecklist(Trip trip, AiItineraryResult itinerary) {
@@ -267,7 +301,9 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
         aiUsageRepository.save(AiUsage.builder()
                 .user(user)
                 .trip(trip)
-                .provider("gemini-3.1-pro-preview")
+                // truncate vì cột provider giới hạn 30 ký tự; model id từ config có thể dài hơn
+                // → tránh lỗi truncate khi flush làm rollback cả transaction persist (mất trip dù đã tốn AI)
+                .provider(truncate(aiProperties.getOpenaiCompat().getModel(), 30))
                 .tokensIn(aiResult.promptTokens())
                 .tokensOut(aiResult.completionTokens())
                 .costUsd(costUsd)

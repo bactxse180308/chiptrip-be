@@ -2,10 +2,15 @@ package com.tranbac.chiptripbe.module.trip.controller;
 
 import com.tranbac.chiptripbe.common.response.ApiResponse;
 import com.tranbac.chiptripbe.common.security.UserPrincipal;
+import com.tranbac.chiptripbe.module.trip.dto.request.ActivityAlternativesRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.CreateActivityRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.ReorderActivitiesRequest;
+import com.tranbac.chiptripbe.module.trip.dto.request.ReplaceActivityRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateActivityRequest;
+import com.tranbac.chiptripbe.module.trip.dto.response.ActivityAlternativesResponse;
+import com.tranbac.chiptripbe.module.trip.dto.response.ReplaceActivityResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
+import com.tranbac.chiptripbe.module.trip.service.ActivityAlternativeService;
 import com.tranbac.chiptripbe.module.trip.service.ActivityService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -17,15 +22,16 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
-@Tag(name = "Activities", description = "Quản lý hoạt động trong chuyến đi")
+@Tag(name = "Activities", description = "Manage trip activities")
 @RestController
 @RequestMapping("/api/v1/trips/{tripId}/days/{dayId}/activities")
 @RequiredArgsConstructor
 public class ActivityController {
 
     private final ActivityService activityService;
+    private final ActivityAlternativeService activityAlternativeService;
 
-    @Operation(summary = "Thêm hoạt động vào ngày")
+    @Operation(summary = "Add activity to day")
     @SecurityRequirement(name = "bearerAuth")
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
@@ -38,7 +44,7 @@ public class ActivityController {
                 .body(ApiResponse.created(activityService.addActivity(principal.getId(), tripId, dayId, request)));
     }
 
-    @Operation(summary = "Cập nhật hoạt động")
+    @Operation(summary = "Update activity")
     @SecurityRequirement(name = "bearerAuth")
     @PatchMapping("/{activityId}")
     public ResponseEntity<ApiResponse<TripDetailResponse.ActivityDetail>> updateActivity(
@@ -51,7 +57,45 @@ public class ActivityController {
                 activityService.updateActivity(principal.getId(), tripId, dayId, activityId, request)));
     }
 
-    @Operation(summary = "Xoá hoạt động")
+    @Operation(summary = "Create activity replacement suggestions")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/{activityId}/alternatives")
+    public ResponseEntity<ApiResponse<ActivityAlternativesResponse>> getActiveAlternatives(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @PathVariable Long tripId,
+            @PathVariable Long dayId,
+            @PathVariable Long activityId) {
+        return ResponseEntity.ok(ApiResponse.ok(activityAlternativeService.getActiveAlternatives(
+                principal.getId(), tripId, dayId, activityId)));
+    }
+
+    @Operation(summary = "Create activity replacement suggestions")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{activityId}/alternatives")
+    public ResponseEntity<ApiResponse<ActivityAlternativesResponse>> createAlternatives(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @PathVariable Long tripId,
+            @PathVariable Long dayId,
+            @PathVariable Long activityId,
+            @Valid @RequestBody ActivityAlternativesRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(activityAlternativeService.createAlternatives(
+                principal.getId(), tripId, dayId, activityId, request)));
+    }
+
+    @Operation(summary = "Replace activity with a selected suggestion")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{activityId}/replace")
+    public ResponseEntity<ApiResponse<ReplaceActivityResponse>> replaceActivity(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @PathVariable Long tripId,
+            @PathVariable Long dayId,
+            @PathVariable Long activityId,
+            @Valid @RequestBody ReplaceActivityRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(activityAlternativeService.replaceActivity(
+                principal.getId(), tripId, dayId, activityId, request)));
+    }
+
+    @Operation(summary = "Delete activity")
     @SecurityRequirement(name = "bearerAuth")
     @DeleteMapping("/{activityId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -64,7 +108,7 @@ public class ActivityController {
         return ResponseEntity.status(HttpStatus.NO_CONTENT).body(ApiResponse.noContent());
     }
 
-    @Operation(summary = "Sắp xếp lại thứ tự hoạt động")
+    @Operation(summary = "Reorder activities")
     @SecurityRequirement(name = "bearerAuth")
     @PostMapping("/reorder")
     @ResponseStatus(HttpStatus.NO_CONTENT)

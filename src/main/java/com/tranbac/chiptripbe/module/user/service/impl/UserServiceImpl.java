@@ -131,6 +131,8 @@ class UserServiceImpl implements UserService {
                 .fullName(user.getFullName())
                 .avatarUrl(user.getAvatarUrl())
                 .aiCredits(user.getAiCredits())
+                .aiCreditUnits(user.effectiveAiCreditUnits())
+                .aiCreditBalance(user.aiCreditBalance())
                 .isActive(user.getIsActive())
                 .emailVerified(user.getEmailVerified())
                 .role(user.getRole().getName())
@@ -196,7 +198,14 @@ class UserServiceImpl implements UserService {
     }
 
     private Object aggregateValueAt(Object[] row, int index) {
-        return row.length > index ? row[index] : null;
+        Object[] values = unwrapAggregateRow(row);
+        return values.length > index ? values[index] : null;
+    }
+
+    private Object[] unwrapAggregateRow(Object[] row) {
+        if (row == null || row.length == 0) return new Object[0];
+        if (row.length == 1 && row[0] instanceof Object[] nested) return nested;
+        return row;
     }
 
     @Override
@@ -209,7 +218,7 @@ class UserServiceImpl implements UserService {
             user.setFullName(request.getFullName());
         }
         if (request.getAiCredits() != null) {
-            user.setAiCredits(request.getAiCredits());
+            user.setWholeAiCredits(request.getAiCredits());
         }
         log.info("Admin updated userId={}", userId);
         return toResponse(userRepository.save(user));
@@ -296,7 +305,7 @@ class UserServiceImpl implements UserService {
     public UserResponse adminGrantCredits(Long userId, GrantCreditsRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
-        user.setAiCredits(user.getAiCredits() + request.getAmount());
+        user.addWholeAiCredits(request.getAmount());
         userRepository.save(user);
         log.info("Admin granted {} credits to userId={}", request.getAmount(), userId);
         return toResponse(user);
@@ -401,6 +410,10 @@ class UserServiceImpl implements UserService {
                 .fullName(user.getFullName())
                 .avatarUrl(user.getAvatarUrl())
                 .aiCredits(user.getAiCredits())
+                .aiCreditUnits(user.effectiveAiCreditUnits())
+                .aiCreditBalance(user.aiCreditBalance())
+                .isPremium(user.isPremium())
+                .trialCreditBalance(user.getTrialCreditBalance())
                 .isActive(user.getIsActive())
                 .emailVerified(user.getEmailVerified())
                 .role(user.getRole().getName())

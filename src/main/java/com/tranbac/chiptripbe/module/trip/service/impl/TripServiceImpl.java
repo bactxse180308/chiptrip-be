@@ -24,6 +24,7 @@ import com.tranbac.chiptripbe.module.trip.entity.Activity;
 import com.tranbac.chiptripbe.module.trip.entity.ChecklistItem;
 import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.entity.TripDay;
+import com.tranbac.chiptripbe.module.trip.repository.ActivityAlternativeSessionRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ChecklistItemRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripCommentRepository;
@@ -36,6 +37,7 @@ import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
 import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
+import com.tranbac.chiptripbe.module.user.service.EntitlementPolicy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -47,6 +49,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -59,9 +63,12 @@ import java.util.concurrent.TimeUnit;
 @Transactional(readOnly = true)
 class TripServiceImpl implements TripService {
 
+    private static final ZoneId VN_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
+
     private final TripRepository tripRepository;
     private final TripDayRepository tripDayRepository;
     private final ActivityRepository activityRepository;
+    private final ActivityAlternativeSessionRepository activityAlternativeSessionRepository;
     private final ChecklistItemRepository checklistItemRepository;
     private final TripMemberRepository tripMemberRepository;
     private final TripLikeRepository tripLikeRepository;
@@ -105,16 +112,44 @@ class TripServiceImpl implements TripService {
                 userId, request, aiCallResult, resolvedPlaces);
     }
 
-    /** @return User.preferences (gu du lịch đã lưu) để cá nhân hóa prompt AI — null nếu chưa có. */
+    /**
+     * Read-only, TRƯỚC khi gọi Gemini (fail-fast). KHÔNG trừ credit ở đây — nguồn chân lý là
+     * lần deduct atomic trong persist (CREDIT_PREMIUM_SPEC.md Mục 5.5).
+     *
+     * @return User.preferences (gu du lịch đã lưu) để cá nhân hóa prompt AI — null nếu chưa có.
+     */
     private String validateRequestAndCredits(Long userId, GenerateTripRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
 
-        if (user.getAiCredits() <= 0) {
-            throw AppException.badRequest("Hết lượt AI. Vui lòng mua thêm credits.");
+        boolean premiumNow = user.isPremium();
+
+        // 1) Giới hạn theo tier (BE bắt buộc — không tin FE)
+        long tripDays = ChronoUnit.DAYS.between(request.getStartDate(), request.getEndDate()) + 1;
+        int maxDays = EntitlementPolicy.maxTripDays(premiumNow);
+        if (tripDays > maxDays) {
+            throw AppException.limitExceeded(
+                    premiumNow
+                            ? "Lịch trình tối đa " + maxDays + " ngày."
+                            : "Tài khoản thường chỉ tạo lịch trình tối đa " + maxDays + " ngày.",
+                    "PREMIUM");
+        }
+        int styleCount = request.getStyles() != null ? request.getStyles().size() : 0;
+        int maxStyles = EntitlementPolicy.maxStyles(premiumNow);
+        if (styleCount > maxStyles) {
+            throw AppException.limitExceeded(
+                    "Tài khoản thường chỉ chọn tối đa " + maxStyles + " phong cách.", "PREMIUM");
         }
 
-        LocalDate today = LocalDate.now();
+        // 2) Có credit để generate không (fail-fast, không trừ ở đây)
+        int effectiveTrial = today().equals(user.getTrialCreditDate()) ? user.getTrialCreditBalance() : 1;
+        boolean hasCredit = user.effectiveAiCreditUnits() >= 100 || effectiveTrial >= 1;
+        if (!hasCredit) {
+            throw AppException.dailyTrialUsed();   // 402
+        }
+
+        // 3) Validate ngày (bug #4: không cho ngày quá khứ)
+        LocalDate today = today();
         if (request.getStartDate().isBefore(today)) {
             throw AppException.badRequest("Ngày bắt đầu không được trước ngày hôm nay");
         }
@@ -122,6 +157,11 @@ class TripServiceImpl implements TripService {
             throw AppException.badRequest("Ngày kết thúc không được trước ngày bắt đầu");
         }
         return user.getPreferences();
+    }
+
+    /** Ngày hiện tại theo giờ VN (reset trial & validate ngày theo Asia/Ho_Chi_Minh, không UTC). */
+    private LocalDate today() {
+        return LocalDate.now(VN_ZONE);
     }
 
     /** Activity geocodable kèm ngày của AiDay chứa nó (null nếu date AI sinh không parse được). */
@@ -199,12 +239,20 @@ class TripServiceImpl implements TripService {
                             .anyMatch(g -> parseActivityType(g.act().getType()) == ActivityType.TRANSPORT);
                     boolean hasAccommodation = group.stream()
                             .anyMatch(g -> parseActivityType(g.act().getType()) == ActivityType.ACCOMMODATION);
+                    // Hướng 2: POI cơ sở kinh doanh (FOOD/ATTRACTION) ưu tiên định danh qua SerpApi —
+                    // tránh Goong gom nhiều nhà hàng/điểm khác nhau về cùng 1 toạ độ vùng.
+                    // TRANSPORT/ACCOMMODATION giữ Goong-first (Goong tốt cho sân bay/ga; hotel có luồng enrich riêng).
+                    boolean hasNamedPoi = group.stream().anyMatch(g -> {
+                        ActivityType t = parseActivityType(g.act().getType());
+                        return t == ActivityType.FOOD || t == ActivityType.ATTRACTION;
+                    });
+                    boolean preferSerp = hasNamedPoi && !hasTransport && !hasAccommodation;
                     List<PlaceEnrichmentService.GeoAnchor> anchors = new ArrayList<>(2);
                     if (anchorDest != null) anchors.add(anchorDest);
                     if (hasTransport && anchorDep != null) anchors.add(anchorDep);
                     try {
                         Optional<PlaceCache> placeOpt = placeEnrichmentService.resolvePlace(
-                                first.getSearchQuery(), destination, anchors, deadline);
+                                first.getSearchQuery(), destination, anchors, deadline, preferSerp);
                         placeOpt.ifPresent(cache -> {
                             if (hasAccommodation) {
                                 // Check-in/out theo đúng dải đêm của khách sạn này (trip có thể
@@ -312,6 +360,7 @@ class TripServiceImpl implements TripService {
         Trip trip = findTripByIdAndUserId(tripId, userId);
         aiUsageRepository.nullifyTripReference(tripId);
         // likes/comments dùng cột tripId Long thuần (không FK cascade) — phải cleanup tay
+        activityAlternativeSessionRepository.deleteByTripId(tripId);
         tripLikeRepository.deleteByTripId(tripId);
         tripCommentRepository.deleteByTripId(tripId);
         tripRepository.delete(trip);
@@ -354,8 +403,13 @@ class TripServiceImpl implements TripService {
                         .description(originalActivity.getDescription())
                         .type(originalActivity.getType())
                         .costVnd(originalActivity.getCostVnd())
+                        .searchQuery(originalActivity.getSearchQuery())
                         .latitude(originalActivity.getLatitude())
                         .longitude(originalActivity.getLongitude())
+                        .placeId(originalActivity.getPlaceId())
+                        .formattedAddress(originalActivity.getFormattedAddress())
+                        .geocodingProvider(originalActivity.getGeocodingProvider())
+                        .placeCacheId(originalActivity.getPlaceCacheId())
                         .imageUrl(originalActivity.getImageUrl())
                         .bookingUrl(originalActivity.getBookingUrl())
                         .displayOrder(originalActivity.getDisplayOrder())
@@ -495,6 +549,7 @@ class TripServiceImpl implements TripService {
                 .likesCount(trip.getLikesCount())
                 .commentsCount(trip.getCommentsCount())
                 .status(TripLifecycleStatus.of(trip.getDateStart(), trip.getDateEnd(), LocalDate.now()).name())
+                .createdAsPremium(trip.isGeneratedAsPremium())
                 .user(TripDetailResponse.UserInfo.builder()
                         .id(trip.getUser().getId())
                         .email(trip.getUser().getEmail())

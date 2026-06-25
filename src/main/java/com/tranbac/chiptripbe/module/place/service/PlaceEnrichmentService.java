@@ -41,9 +41,15 @@ public interface PlaceEnrichmentService {
      *
      * Nếu SerpApi fail, vẫn trả PlaceCache với dữ liệu Goong (lat/lng/address).
      * deadline (nullable): quá hạn thì bỏ qua các external call còn lại (fail-soft).
+     *
+     * preferSerpIdentity: với POI là cơ sở kinh doanh (nhà hàng/điểm tham quan) đặt true —
+     * resolve danh tính qua SerpApi trước (chính xác hơn Goong cho tên cụ thể; Goong hay gom
+     * các tên không có trong gazetteer về cùng 1 toạ độ vùng), chỉ rơi về Goong khi SerpApi miss.
+     * Với địa danh/giao thông (Goong tốt hơn) đặt false → giữ Goong-first như cũ.
      */
     Optional<PlaceCache> resolvePlace(String placeName, String destination,
-                                      List<GeoAnchor> anchors, Instant deadline);
+                                      List<GeoAnchor> anchors, Instant deadline,
+                                      boolean preferSerpIdentity);
 
     /**
      * Enrich thêm thông tin khách sạn (bookingUrl + pricePerNightVnd) từ SerpApi Google Hotels,

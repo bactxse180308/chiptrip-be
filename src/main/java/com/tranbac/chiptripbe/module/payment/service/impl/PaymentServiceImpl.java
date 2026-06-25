@@ -1,7 +1,5 @@
 package com.tranbac.chiptripbe.module.payment.service.impl;
 
-import com.tranbac.chiptripbe.common.enums.RoleName;
-import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.payment.config.SepayProperties;
 import com.tranbac.chiptripbe.module.payment.dto.SepayWebhookPayload;
 import com.tranbac.chiptripbe.module.payment.entity.OrderStatus;
@@ -10,8 +8,6 @@ import com.tranbac.chiptripbe.module.payment.entity.PaymentTransaction;
 import com.tranbac.chiptripbe.module.payment.repository.PaymentOrderRepository;
 import com.tranbac.chiptripbe.module.payment.repository.PaymentTransactionRepository;
 import com.tranbac.chiptripbe.module.payment.service.PaymentService;
-import com.tranbac.chiptripbe.module.user.entity.Role;
-import com.tranbac.chiptripbe.module.user.repository.RoleRepository;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -31,7 +27,6 @@ class PaymentServiceImpl implements PaymentService {
     private final PaymentTransactionRepository paymentRepo;
     private final PaymentOrderRepository orderRepository;
     private final UserRepository userRepository;
-    private final RoleRepository roleRepository;
     private final SepayProperties sepayProperties;
 
     // Mã đơn hàng = "CHIP" + 8 hex (sinh ở OrderServiceImpl). Tìm trong nội dung CK.
@@ -90,18 +85,17 @@ class PaymentServiceImpl implements PaymentService {
                     order.getId(), LocalDateTime.now(), payload.getId(),
                     OrderStatus.PAID, OrderStatus.PENDING);
             if (updated == 1) {
+                // Cộng paid credit → user TỰ thành Premium vì paidCreditBalance > 0.
+                // KHÔNG nâng ROLE_PREMIUM: role slot dành cho RBAC (USER/ADMIN); premium là
+                // trạng thái suy ra từ paid, tránh desync khi user xài hết paid. Spec Mục 5.8.
                 userRepository.addCredits(order.getUserId(), order.getCredits());
-                Role premiumRole = findRole(RoleName.PREMIUM);
-                Role adminRole = findRole(RoleName.ADMIN);
-                int roleUpdated = userRepository.upgradeToPremiumUnlessAdmin(
-                        order.getUserId(), premiumRole, adminRole);
                 creditsGranted = order.getCredits();
                 matchedUserId = order.getUserId();
                 matchedPlan = order.getPlanCode();
                 matchedCode = order.getOrderCode();
-                log.info("Order {} PAID: +{} credits to userId={}, premiumRoleUpdated={}, amount={} VND, sepayId={}",
+                log.info("Order {} PAID: +{} credits to userId={}, amount={} VND, sepayId={}",
                         order.getOrderCode(), order.getCredits(), order.getUserId(),
-                        roleUpdated, payload.getTransferAmount(), payload.getId());
+                        payload.getTransferAmount(), payload.getId());
             } else {
                 log.info("Order {} was settled concurrently, sepayId={}", order.getOrderCode(), payload.getId());
                 matchedCode = order.getOrderCode();
@@ -164,10 +158,5 @@ class PaymentServiceImpl implements PaymentService {
                 .build();
 
         paymentRepo.save(tx);
-    }
-
-    private Role findRole(String roleName) {
-        return roleRepository.findByName(roleName)
-                .orElseThrow(() -> AppException.notFound("Role not found: " + roleName));
     }
 }

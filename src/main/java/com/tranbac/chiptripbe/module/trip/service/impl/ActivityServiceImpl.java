@@ -8,6 +8,7 @@ import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
 import com.tranbac.chiptripbe.module.trip.entity.Activity;
 import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.entity.TripDay;
+import com.tranbac.chiptripbe.module.trip.repository.ActivityAlternativeSessionRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripDayRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
@@ -17,7 +18,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @Slf4j
 @Service
@@ -26,6 +31,7 @@ import java.util.List;
 class ActivityServiceImpl implements ActivityService {
 
     private final ActivityRepository activityRepository;
+    private final ActivityAlternativeSessionRepository activityAlternativeSessionRepository;
     private final TripDayRepository tripDayRepository;
     private final TripRepository tripRepository;
 
@@ -100,6 +106,7 @@ class ActivityServiceImpl implements ActivityService {
             throw AppException.badRequest("Hoạt động không thuộc ngày này");
         }
 
+        activityAlternativeSessionRepository.deleteByActivityId(activityId);
         activityRepository.delete(activity);
         log.info("Deleted activity id={}", activityId);
     }
@@ -110,17 +117,35 @@ class ActivityServiceImpl implements ActivityService {
         Trip trip = findTripAndValidateOwnership(tripId, userId);
         findDayAndValidate(dayId, trip);
 
-        List<Activity> activities = activityRepository.findByDayIdOrderByDisplayOrder(dayId);
-        for (int i = 0; i < request.getOrderedIds().size(); i++) {
-            final int order = i + 1;
-            final Long actId = request.getOrderedIds().get(i);
-            activities.stream()
-                    .filter(a -> a.getId().equals(actId))
-                    .findFirst()
-                    .ifPresent(a -> a.setDisplayOrder(order));
+        // Khóa ghi để tránh chèn/đổi thứ tự song song xen vào giữa đọc và ghi
+        List<Activity> activities = activityRepository.findByDayIdForUpdateOrderByDisplayOrder(dayId);
+        Map<Long, Activity> byId = new HashMap<>();
+        for (Activity a : activities) byId.put(a.getId(), a);
+
+        // Validate: mỗi id phải thuộc ngày này và không trùng lặp
+        Set<Long> ordered = new LinkedHashSet<>();
+        for (Long actId : request.getOrderedIds()) {
+            if (!byId.containsKey(actId)) {
+                throw AppException.badRequest("Hoạt động không thuộc ngày này");
+            }
+            if (!ordered.add(actId)) {
+                throw AppException.badRequest("Danh sách sắp xếp bị trùng");
+            }
+        }
+
+        // Gán thứ tự cho các id được gửi; activity không nằm trong danh sách được đẩy xuống cuối
+        // (giữ thứ tự tương đối) để không bao giờ tồn tại displayOrder trùng nhau
+        int order = 1;
+        for (Long actId : ordered) {
+            byId.get(actId).setDisplayOrder(order++);
+        }
+        for (Activity a : activities) {
+            if (!ordered.contains(a.getId())) {
+                a.setDisplayOrder(order++);
+            }
         }
         activityRepository.saveAll(activities);
-        log.info("Reordered {} activities in dayId={}", request.getOrderedIds().size(), dayId);
+        log.info("Reordered {} activities in dayId={}", ordered.size(), dayId);
     }
 
     // ─── Private helpers ─────────────────────────────────────────────────────

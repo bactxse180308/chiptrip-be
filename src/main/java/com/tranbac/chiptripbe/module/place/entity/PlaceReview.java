@@ -23,6 +23,11 @@ public class PlaceReview extends BaseEntity {
     @Column(name = "place_cache_id", nullable = false)
     private Long placeCacheId;
 
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "place_cache_id", nullable = false, insertable = false, updatable = false,
+            foreignKey = @ForeignKey(name = "fk_place_reviews_place_cache"))
+    private PlaceCache placeCache;
+
     /**
      * FK NO ACTION tới users — giả định user chỉ bị soft-delete (isActive=false).
      * Nếu sau này có hard-delete user, phải xóa review của user đó trước.

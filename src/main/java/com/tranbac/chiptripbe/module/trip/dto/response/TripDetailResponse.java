@@ -35,6 +35,9 @@ public class TripDetailResponse {
     /** UPCOMING / ONGOING / COMPLETED — derived từ dateStart/dateEnd. */
     private String status;
 
+    /** Snapshot lúc tạo: trip tạo bởi tài khoản Premium → quyết định Export PDF & gate FE. */
+    private boolean createdAsPremium;
+
     private UserInfo user;
     private List<TripMemberResponse> members;
     private List<DayDetail> days;

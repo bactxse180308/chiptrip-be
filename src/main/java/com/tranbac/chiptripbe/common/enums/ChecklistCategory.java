@@ -4,5 +4,7 @@ public enum ChecklistCategory {
     PAPERS,
     CLOTHES,
     HYGIENE,
+    ELECTRONICS,
+    MEDICINE,
     OTHER
 }

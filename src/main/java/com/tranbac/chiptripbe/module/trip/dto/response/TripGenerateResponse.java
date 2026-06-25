@@ -26,6 +26,8 @@ public class TripGenerateResponse {
     private String styles;
     private LocalDateTime createdAt;
     private Long totalCostVnd;
+    /** Số địa điểm geocodable mà backend không định vị được (lat/lng null) — FE cảnh báo nhẹ. */
+    private Integer geocodeFailedCount;
     private List<DayDetail> days;
     private List<ChecklistDetail> checklist;
 

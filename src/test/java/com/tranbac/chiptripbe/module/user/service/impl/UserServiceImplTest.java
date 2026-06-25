@@ -54,7 +54,7 @@ class UserServiceImplTest {
         when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user()));
         when(tripRepository.findByUserId(eq(USER_ID), any(Pageable.class))).thenReturn(Page.empty());
         when(aiUsageRepository.aggregateByUserId(USER_ID))
-                .thenReturn(List.<Object[]>of(new Object[]{2L, 300L, 700L, new BigDecimal("0.0123")}));
+                .thenReturn(List.<Object[]>of(new Object[]{new Object[]{2L, 300L, 700L, new BigDecimal("0.0123")}}));
         when(refreshTokenRepository.countByUserIdAndRevokedFalse(USER_ID)).thenReturn(1L);
         when(paymentOrderRepository.findByUserIdOrderByCreatedAtDesc(USER_ID)).thenReturn(List.of());
 

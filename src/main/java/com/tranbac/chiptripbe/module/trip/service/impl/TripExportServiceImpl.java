@@ -44,6 +44,11 @@ class TripExportServiceImpl implements TripExportService {
     public byte[] exportPdf(Long userId, Long tripId) {
         // getTripDetail đã kiểm tra quyền sở hữu (forbidden nếu không phải owner)
         TripDetailResponse trip = tripService.getTripDetail(userId, tripId);
+        // Gate theo snapshot lúc tạo, KHÔNG theo paid hiện tại → mua 1 credit, generate (paid→0)
+        // vẫn export được chuyến đó (tránh "cliff"). CREDIT_PREMIUM_SPEC.md Mục 5.7.
+        if (!trip.isCreatedAsPremium()) {
+            throw AppException.premiumRequired();   // 403 PREMIUM_REQUIRED
+        }
         String html = buildHtml(trip);
 
         try {

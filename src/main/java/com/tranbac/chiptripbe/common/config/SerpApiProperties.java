@@ -19,4 +19,6 @@ public class SerpApiProperties {
     private int cacheTtlDays = 7;
     /** Số phút backoff giữa các lần retry SerpApi khi row chưa enrich đủ — chống thundering herd khi SerpApi down */
     private int retryBackoffMinutes = 60;
+    /** Số request SerpApi đồng thời tối đa (throttle chống 429 khi enrichment fan-out song song) */
+    private int maxConcurrent = 3;
 }

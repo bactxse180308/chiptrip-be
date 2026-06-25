@@ -83,6 +83,18 @@ public class Trip extends BaseAuditEntity {
     @Builder.Default
     private Integer commentsCount = 0;
 
+    @Column(name = "generated_as_premium", columnDefinition = "bit NOT NULL DEFAULT 0")
+    @Builder.Default
+    private boolean generatedAsPremium = false;
+
+    @Column(name = "activity_swap_free_limit", columnDefinition = "INT NOT NULL DEFAULT 0")
+    @Builder.Default
+    private Integer activitySwapFreeLimit = 0;
+
+    @Column(name = "activity_swap_free_used", columnDefinition = "INT NOT NULL DEFAULT 0")
+    @Builder.Default
+    private Integer activitySwapFreeUsed = 0;
+
     @OneToMany(mappedBy = "trip", cascade = CascadeType.ALL,
             orphanRemoval = true, fetch = FetchType.LAZY)
     @OrderBy("dayNumber ASC")

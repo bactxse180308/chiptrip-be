@@ -79,6 +79,9 @@ app:
     enabled: true
     cache-ttl-days: 30
     retry-backoff-minutes: 360
+    # Số request SerpApi đồng thời tối đa (throttle chống 429 khi enrichment fan-out song song).
+    # Hạ nếu gói SerpApi giới hạn chặt; nâng nếu gói cho phép nhiều concurrent hơn.
+    max-concurrent: 3
   posthog:
     api-host: ${POSTHOG_API_HOST:https://us.posthog.com}
     project-id: ${POSTHOG_PROJECT_ID:}

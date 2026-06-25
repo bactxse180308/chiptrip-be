@@ -1,6 +1,7 @@
 package com.tranbac.chiptripbe.module.payment.entity;
 
 import com.tranbac.chiptripbe.common.entity.BaseEntity;
+import com.tranbac.chiptripbe.module.user.entity.User;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -23,6 +24,11 @@ public class PaymentOrder extends BaseEntity {
 
     @Column(name = "user_id", nullable = false)
     private Long userId;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "user_id", nullable = false, insertable = false, updatable = false,
+            foreignKey = @ForeignKey(name = "fk_payment_orders_user"))
+    private User user;
 
     @Column(name = "plan_code", nullable = false, length = 30)
     private String planCode;

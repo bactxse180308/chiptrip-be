@@ -95,7 +95,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public Optional<PlaceCache> resolvePlace(String placeName, String destination,
-                                             List<GeoAnchor> anchors, Instant deadline) {
+                                             List<GeoAnchor> anchors, Instant deadline,
+                                             boolean preferSerpIdentity) {
         if (placeName == null || placeName.isBlank()) return Optional.empty();
 
         String cleanedName = cleanPlaceName(placeName);
@@ -111,12 +112,23 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
 
         if (pastDeadline(deadline)) return Optional.empty();
 
+        // Hướng 2: POI cơ sở kinh doanh (nhà hàng/điểm tham quan) → SerpApi định danh chính xác hơn Goong.
+        // Resolve qua SerpApi trước; nếu tìm được địa điểm thật (có GPS, khớp vùng) thì dùng luôn,
+        // tránh việc Goong gom nhiều tên khác nhau về cùng 1 toạ độ vùng → trùng địa điểm.
+        if (preferSerpIdentity) {
+            Optional<PlaceCache> viaSerp = resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination,
+                    destination, anchors, deadline);
+            if (viaSerp.isPresent()) return viaSerp;
+            if (pastDeadline(deadline)) return Optional.empty();
+            log.debug("SerpApi-first miss cho '{}' — rơi về Goong", cleanedName);
+        }
+
         // 2. Goong geocode — ưu tiên để có lat/lng chính xác; SerpApi là fallback
         String geocodeQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
         Optional<GoongClient.GeocodeResult> geoOpt = goongClient.forwardGeocode(geocodeQuery);
         if (geoOpt.isEmpty()) {
             log.debug("Goong geocode: không tìm thấy '{}', thử SerpApi fallback", geocodeQuery);
-            return resolvePlaceViaSerpApiFallback(cleanedName, normalized, normalizedDestination, destination,
+            return resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination, destination,
                     anchors, deadline);
         }
 
@@ -128,7 +140,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 normalizedDestination, anchors)) {
             log.warn("Goong mismatch: query='{}', address='{}', expectedDestination='{}' — thử SerpApi fallback",
                     geocodeQuery, geo.formattedAddress(), destination);
-            return resolvePlaceViaSerpApiFallback(cleanedName, normalized, normalizedDestination, destination,
+            return resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination, destination,
                     anchors, deadline);
         }
 
@@ -172,9 +184,13 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         toSave.setCommuneName(geo.communeName());
         toSave.setLastSyncedAt(LocalDateTime.now());
 
-        // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu data Goong)
-        SerpEnrichOutcome outcome = enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination,
-                geo, anchors, deadline, placeName);
+        // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu data Goong).
+        // Nếu đã thử SerpApi-first ở trên mà miss (preferSerpIdentity=true rồi rơi xuống Goong) thì
+        // KHÔNG search lại cùng query — tránh gọi SerpApi 2 lần (đốt quota, đẩy 429) cho 1 activity.
+        SerpEnrichOutcome outcome = preferSerpIdentity
+                ? new SerpEnrichOutcome(false, LocalDateTime.now())
+                : enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination,
+                        geo, anchors, deadline, placeName);
         toSave.setSerpEnriched(outcome.enriched());
         toSave.setSerpSyncedAt(outcome.syncedAt());
         try {
@@ -613,10 +629,11 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     }
 
     /**
-     * Fallback khi Goong không geocode được hoặc trả kết quả sai vùng: dùng SerpApi Google Maps
-     * để lấy lat/lng + enrich. Chỉ lưu nếu candidate có GPS và khớp vùng (address/anchor).
+     * Resolve địa điểm bằng SerpApi Google Maps (lat/lng + enrich). Dùng cho 2 trường hợp:
+     * (a) Goong không geocode được / trả sai vùng (fallback); (b) POI cơ sở kinh doanh cần
+     * SerpApi định danh chính xác (preferSerpIdentity). Chỉ lưu nếu candidate có GPS và khớp vùng.
      */
-    private Optional<PlaceCache> resolvePlaceViaSerpApiFallback(
+    private Optional<PlaceCache> resolvePlaceViaSerpApi(
             String cleanedName, String normalized, String normalizedDestination, String destination,
             List<GeoAnchor> anchors, Instant deadline) {
 

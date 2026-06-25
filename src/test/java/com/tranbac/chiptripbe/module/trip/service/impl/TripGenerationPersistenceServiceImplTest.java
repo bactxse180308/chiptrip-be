@@ -16,10 +16,13 @@ import com.tranbac.chiptripbe.module.trip.repository.TripDayRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.user.entity.User;
+import com.tranbac.chiptripbe.module.user.enums.CreditSource;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
+import com.tranbac.chiptripbe.module.user.service.CreditService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -61,6 +64,7 @@ class TripGenerationPersistenceServiceImplTest {
     @Mock private ObjectMapper objectMapper;
     @Mock private TripMemberService tripMemberService;
     @Mock private ApplicationEventPublisher eventPublisher;
+    @Mock private CreditService creditService;
 
     @InjectMocks
     private TripGenerationPersistenceServiceImpl service;
@@ -69,7 +73,12 @@ class TripGenerationPersistenceServiceImplTest {
 
     @BeforeEach
     void setup() throws Exception {
-        User user = User.builder().email("u@e.com").fullName("U").aiCredits(3).build();
+        // aiCredits(3) → effectiveAiCreditUnits()=300 > 0 → isPremium()=true (premium suy ra từ paid)
+        User user = User.builder()
+                .email("u@e.com")
+                .fullName("U")
+                .aiCredits(3)
+                .build();
         user.setId(USER_ID);
         when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
 
@@ -98,41 +107,59 @@ class TripGenerationPersistenceServiceImplTest {
 
         AiProperties.Pricing pricing = new AiProperties.Pricing();
         when(aiProperties.getPricing()).thenReturn(pricing);
+        when(aiProperties.getOpenaiCompat()).thenReturn(new AiProperties.OpenAiCompat());
     }
 
     @Test
-    void persistGeneratedTrip_creditExhausted_throwsAppException() {
-        when(userRepository.deductCreditIfAvailable(USER_ID)).thenReturn(0);
+    void persistGeneratedTrip_creditExhausted_throwsAppExceptionAndNoEvent() {
+        when(creditService.consumeForGenerate(USER_ID)).thenThrow(AppException.dailyTrialUsed());
 
         AppException ex = assertThrows(AppException.class,
                 () -> service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap()));
 
-        assertTrue(ex.getMessage().contains("Hết lượt AI"),
-                "Message phải báo hết lượt: " + ex.getMessage());
+        assertEquals("DAILY_TRIAL_USED", ex.getCode());
         verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
-    void persistGeneratedTrip_creditDeductedRemainingHigh_noLowCreditsEvent() {
-        when(userRepository.deductCreditIfAvailable(USER_ID)).thenReturn(1);
-        when(userRepository.findAiCreditsById(USER_ID)).thenReturn(5);
+    void persistGeneratedTrip_paidRemainingHigh_noLowCreditsEvent() {
+        when(creditService.consumeForGenerate(USER_ID)).thenReturn(CreditSource.PAID);
+        when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(500);
 
         assertDoesNotThrow(() ->
                 service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap()));
 
-        verify(userRepository, times(1)).deductCreditIfAvailable(USER_ID);
+        verify(creditService, times(1)).consumeForGenerate(USER_ID);
         verify(eventPublisher, never()).publishEvent(any(AiCreditsLowEvent.class));
+
+        // generatedAsPremium snapshot suy ra từ paid balance (isPremium), không từ ROLE_PREMIUM
+        ArgumentCaptor<Trip> tripCaptor = ArgumentCaptor.forClass(Trip.class);
+        verify(tripRepository).save(tripCaptor.capture());
+        assertTrue(tripCaptor.getValue().isGeneratedAsPremium());
+        assertEquals(4, tripCaptor.getValue().getActivitySwapFreeLimit());
+        assertEquals(0, tripCaptor.getValue().getActivitySwapFreeUsed());
     }
 
     @Test
-    void persistGeneratedTrip_creditDeductedRemainingLow_publishesLowCreditsEvent() {
-        when(userRepository.deductCreditIfAvailable(USER_ID)).thenReturn(1);
-        when(userRepository.findAiCreditsById(USER_ID)).thenReturn(1);
+    void persistGeneratedTrip_paidRemainingLow_publishesLowCreditsEvent() {
+        when(creditService.consumeForGenerate(USER_ID)).thenReturn(CreditSource.PAID);
+        when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(75);
 
         service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap());
 
-        verify(userRepository, times(1)).deductCreditIfAvailable(USER_ID);
+        verify(creditService, times(1)).consumeForGenerate(USER_ID);
         verify(eventPublisher, times(1)).publishEvent(any(AiCreditsLowEvent.class));
+    }
+
+    @Test
+    void persistGeneratedTrip_trialRemainingLow_noLowCreditsEvent() {
+        // Tiêu trial (không phải paid) → không cảnh báo nạp dù units thấp
+        when(creditService.consumeForGenerate(USER_ID)).thenReturn(CreditSource.TRIAL);
+        when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(0);
+
+        service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap());
+
+        verify(eventPublisher, never()).publishEvent(any(AiCreditsLowEvent.class));
     }
 
     // ─── helpers ──────────────────────────────────────────────────────────────

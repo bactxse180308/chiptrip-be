@@ -9,6 +9,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.util.UriBuilder;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -18,6 +19,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Client gọi SerpApi (Google Maps engine) để enrich dữ liệu địa điểm:
@@ -39,6 +43,9 @@ public class SerpApiClient {
 
     private WebClient client;
 
+    /** Throttle: giới hạn số request SerpApi đồng thời, chống 429 khi enrichment fan-out song song. */
+    private Semaphore rateLimiter;
+
     @PostConstruct
     void init() {
         ExchangeStrategies strategies = ExchangeStrategies.builder()
@@ -49,6 +56,41 @@ public class SerpApiClient {
                 .baseUrl(properties.getBaseUrl())
                 .exchangeStrategies(strategies)
                 .build();
+        rateLimiter = new Semaphore(Math.max(1, properties.getMaxConcurrent()));
+    }
+
+    /**
+     * Gọi GET /search có throttle: chờ slot tối đa timeoutSeconds, hết slot → trả null (caller fail-soft).
+     * Lỗi HTTP (kể cả 429) để nguyên cho caller bắt; permit luôn được release ở finally.
+     */
+    private Map<String, Object> searchRequest(Consumer<UriBuilder> params) {
+        boolean acquired = false;
+        // Chờ slot ngắn (≈ nửa HTTP timeout): khi hàng đợi đầy thì fail nhanh về Goong fallback
+        // thay vì mỗi thread đốt trọn timeoutSeconds chỉ để chờ slot rồi vượt deadline enrichment.
+        long acquireWaitSeconds = Math.max(1, properties.getTimeoutSeconds() / 2);
+        try {
+            acquired = rateLimiter.tryAcquire(acquireWaitSeconds, TimeUnit.SECONDS);
+            if (!acquired) {
+                log.warn("SerpApi throttle: hết slot ({} đồng thời) sau {}s — bỏ qua request",
+                        properties.getMaxConcurrent(), acquireWaitSeconds);
+                return null;
+            }
+            return client.get()
+                    .uri(b -> {
+                        b.path("/search");
+                        params.accept(b);
+                        return b.build();
+                    })
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                    .block();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return null;
+        } finally {
+            if (acquired) rateLimiter.release();
+        }
     }
 
     /**
@@ -88,18 +130,12 @@ public class SerpApiClient {
 
         try {
             log.info("SerpApi searchPlaceCandidates (engine=google_maps) for query='{}'", query);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/search")
-                            .queryParam("engine", "google_maps")
-                            .queryParam("type", "search")
-                            .queryParam("q", query)
-                            .queryParam("hl", "vi")
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = searchRequest(b -> b
+                    .queryParam("engine", "google_maps")
+                    .queryParam("type", "search")
+                    .queryParam("q", query)
+                    .queryParam("hl", "vi")
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return List.of();
 
@@ -165,22 +201,16 @@ public class SerpApiClient {
 
         try {
             log.info("SerpApi searchHotel (engine=google_hotels) name='{}' {}..{}", name, checkIn, checkOut);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/search")
-                            .queryParam("engine", "google_hotels")
-                            .queryParam("q", name)
-                            .queryParam("check_in_date", checkIn.format(HOTEL_DATE_FORMAT))
-                            .queryParam("check_out_date", checkOut.format(HOTEL_DATE_FORMAT))
-                            .queryParam("adults", adults != null ? adults.toString() : "2")
-                            .queryParam("currency", "VND")
-                            .queryParam("gl", "vn")
-                            .queryParam("hl", "vi")
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = searchRequest(b -> b
+                    .queryParam("engine", "google_hotels")
+                    .queryParam("q", name)
+                    .queryParam("check_in_date", checkIn.format(HOTEL_DATE_FORMAT))
+                    .queryParam("check_out_date", checkOut.format(HOTEL_DATE_FORMAT))
+                    .queryParam("adults", adults != null ? adults.toString() : "2")
+                    .queryParam("currency", "VND")
+                    .queryParam("gl", "vn")
+                    .queryParam("hl", "vi")
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return Optional.empty();
             List<Map<String, Object>> hotels = (List<Map<String, Object>>) resp.get("properties");
@@ -268,22 +298,16 @@ public class SerpApiClient {
         try {
             log.info("SerpApi fetchHotelDetails (property details) propertyToken='{}' {}..{}", propertyToken, checkIn, checkOut);
             // property_token thay thế q — không truyền q kèm property_token
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/search")
-                            .queryParam("engine", "google_hotels")
-                            .queryParam("property_token", propertyToken)
-                            .queryParam("check_in_date", checkIn.format(HOTEL_DATE_FORMAT))
-                            .queryParam("check_out_date", checkOut.format(HOTEL_DATE_FORMAT))
-                            .queryParam("adults", adults != null ? adults.toString() : "2")
-                            .queryParam("currency", "VND")
-                            .queryParam("gl", "vn")
-                            .queryParam("hl", "vi")
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = searchRequest(b -> b
+                    .queryParam("engine", "google_hotels")
+                    .queryParam("property_token", propertyToken)
+                    .queryParam("check_in_date", checkIn.format(HOTEL_DATE_FORMAT))
+                    .queryParam("check_out_date", checkOut.format(HOTEL_DATE_FORMAT))
+                    .queryParam("adults", adults != null ? adults.toString() : "2")
+                    .queryParam("currency", "VND")
+                    .queryParam("gl", "vn")
+                    .queryParam("hl", "vi")
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return Optional.empty();
 
@@ -342,17 +366,11 @@ public class SerpApiClient {
 
         try {
             log.info("SerpApi fetching hotel photos for propertyToken='{}'", propertyToken);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/search")
-                            .queryParam("engine", "google_hotels_photos")
-                            .queryParam("q", "hotel")
-                            .queryParam("property_token", propertyToken)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = searchRequest(b -> b
+                    .queryParam("engine", "google_hotels_photos")
+                    .queryParam("q", "hotel")
+                    .queryParam("property_token", propertyToken)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return List.of();
 
@@ -389,17 +407,11 @@ public class SerpApiClient {
 
         try {
             log.info("SerpApi fetching hotel reviews for propertyToken='{}'", propertyToken);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/search")
-                            .queryParam("engine", "google_hotels_reviews")
-                            .queryParam("q", "hotel")
-                            .queryParam("property_token", propertyToken)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = searchRequest(b -> b
+                    .queryParam("engine", "google_hotels_reviews")
+                    .queryParam("q", "hotel")
+                    .queryParam("property_token", propertyToken)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return List.of();
 
@@ -459,16 +471,10 @@ public class SerpApiClient {
 
         try {
             log.info("SerpApi fetching photos for dataId='{}'", id);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/search")
-                            .queryParam("engine", "google_maps_photos")
-                            .queryParam("data_id", id)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = searchRequest(b -> b
+                    .queryParam("engine", "google_maps_photos")
+                    .queryParam("data_id", id)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return List.of();
 
@@ -508,22 +514,15 @@ public class SerpApiClient {
 
         try {
             log.info("SerpApi fetching reviews for dataId='{}'", dataId);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> {
-                        var builder = b.path("/search")
-                                .queryParam("engine", "google_maps_reviews")
-                                .queryParam("api_key", properties.getApiKey());
-                        if (dataId.startsWith("ChI")) {
-                            builder.queryParam("place_id", dataId);
-                        } else {
-                            builder.queryParam("data_id", dataId);
-                        }
-                        return builder.build();
-                    })
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = searchRequest(b -> {
+                b.queryParam("engine", "google_maps_reviews")
+                        .queryParam("api_key", properties.getApiKey());
+                if (dataId.startsWith("ChI")) {
+                    b.queryParam("place_id", dataId);
+                } else {
+                    b.queryParam("data_id", dataId);
+                }
+            });
 
             if (resp == null) return List.of();
 

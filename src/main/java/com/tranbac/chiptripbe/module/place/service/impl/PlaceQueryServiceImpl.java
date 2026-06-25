@@ -33,7 +33,7 @@ class PlaceQueryServiceImpl implements PlaceQueryService {
     private PlaceDto toDto(PlaceCache p) {
         return PlaceDto.builder()
                 .id(p.getId())
-                .name(p.getName())
+                .name(displayName(p))
                 .address(p.getAddress())
                 .latitude(p.getLatitude())
                 .longitude(p.getLongitude())
@@ -65,11 +65,20 @@ class PlaceQueryServiceImpl implements PlaceQueryService {
         }
     }
 
+    private String displayName(PlaceCache place) {
+        if (place.getSerpTitle() != null && !place.getSerpTitle().isBlank()) {
+            return place.getSerpTitle();
+        }
+        return place.getName();
+    }
+
     private List<PlaceDto.PlacePhoto> parsePhotos(String json) {
         if (json == null || json.isBlank()) return null;
         try {
             List<Map<String, String>> raw = objectMapper.readValue(json, new TypeReference<>() {});
             return raw.stream()
+                    .filter(m -> m.get("url") != null || m.get("thumbnail") != null)
+                    .limit(5)
                     .map(m -> PlaceDto.PlacePhoto.builder()
                             .url(m.get("url"))
                             .thumbnail(m.getOrDefault("thumbnail", m.get("url")))
