@@ -9,7 +9,7 @@ public final class EntitlementPolicy {
     public static final int NORMAL_MAX_TRIP_DAYS = 3;
     public static final int PREMIUM_MAX_TRIP_DAYS = 10;
 
-    public static final int NORMAL_MAX_STYLES = 5;
+    public static final int NORMAL_MAX_STYLES = 2;
     /** Premium: không giới hạn styles — FE coi MAX_VALUE là "không giới hạn". */
     public static final int PREMIUM_MAX_STYLES = Integer.MAX_VALUE;
 

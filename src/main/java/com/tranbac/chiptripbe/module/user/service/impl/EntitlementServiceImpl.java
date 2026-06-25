@@ -23,9 +23,14 @@ class EntitlementServiceImpl implements EntitlementService {
     private static final ZoneId VN = ZoneId.of("Asia/Ho_Chi_Minh");
 
     @Override
-    public void requirePremium(Long userId) {
+    public boolean isPremium(Long userId) {
         Integer units = userRepository.findAiCreditUnitsById(userId);
-        if (units == null || units <= 0) {
+        return units != null && units > 0;
+    }
+
+    @Override
+    public void requirePremium(Long userId) {
+        if (!isPremium(userId)) {
             throw AppException.premiumRequired();   // 403 PREMIUM_REQUIRED
         }
     }

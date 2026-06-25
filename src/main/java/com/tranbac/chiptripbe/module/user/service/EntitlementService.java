@@ -7,6 +7,9 @@ public interface EntitlementService {
     /** Action LIVE chỉ dành cho Premium (đổi hoạt động). Normal → 403 PREMIUM_REQUIRED. */
     void requirePremium(Long userId);
 
+    /** Premium hiện tại = paid balance > 0. Dùng cho gate "createdAsPremium || isPremium". */
+    boolean isPremium(Long userId);
+
     /** Snapshot quyền + giới hạn cho FE gate UI. */
     EntitlementsResponse getEntitlements(Long userId);
 }

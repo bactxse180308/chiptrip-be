@@ -102,18 +102,23 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
     @Override
     public ActivityAlternativesResponse getActiveAlternatives(Long userId, Long tripId, Long dayId, Long activityId) {
         AlternativeContext context = loadContext(userId, tripId, dayId, activityId);
+        boolean premium = entitlementService.isPremium(userId);
         return findActivePendingSession(userId, tripId, dayId, activityId)
-                .map(session -> toAlternativesResponse(session, context.trip()))
-                .orElseGet(() -> emptyAlternativesResponse(context.trip()));
+                .map(session -> toAlternativesResponse(session, context.trip(), premium))
+                .orElseGet(() -> emptyAlternativesResponse(context.trip(), premium));
     }
 
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public ActivityAlternativesResponse createAlternatives(Long userId, Long tripId, Long dayId, Long activityId,
                                                            ActivityAlternativesRequest request) {
-        // Đổi hoạt động là tính năng Premium — Normal → 403 PREMIUM_REQUIRED (Mục 5.6).
-        entitlementService.requirePremium(userId);
         AlternativeContext context = loadContext(userId, tripId, dayId, activityId);
+        // Gate "createdAsPremium HOẶC premium hiện tại": chuyến Premium vẫn đổi được khi paid về 0
+        // (còn lượt free); nạp gói rồi thì đổi được cả chuyến tạo lúc còn Normal. Normal+chưa nạp → 403.
+        boolean premium = entitlementService.isPremium(userId);
+        if (!context.trip().isGeneratedAsPremium() && !premium) {
+            throw AppException.premiumRequired();
+        }
         int limit = normalizeLimit(request.getLimit());
         ActivityAlternativeCategory category = request.getCategory();
         validateCategory(context, category);
@@ -121,7 +126,7 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
         Optional<ActivityAlternativeSession> existingSession =
                 findActivePendingSession(userId, tripId, dayId, activityId, category);
         if (existingSession.isPresent()) {
-            return toAlternativesResponse(existingSession.get(), context.trip());
+            return toAlternativesResponse(existingSession.get(), context.trip(), premium);
         }
 
         AiAlternativeCallResult aiResult = callAi(context, category);
@@ -150,7 +155,7 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
                 .expiresAt(LocalDateTime.now().plusMinutes(SESSION_TTL_MINUTES))
                 .build());
 
-        return toAlternativesResponse(session, context.trip(), options);
+        return toAlternativesResponse(session, context.trip(), options, premium);
     }
 
     @Override
@@ -187,7 +192,8 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
                 .findFirst()
                 .orElseThrow(() -> AppException.badRequest("Lua chon thay the khong hop le"));
 
-        ChargeResult charge = consumeQuotaOrCredit(trip, userId);
+        boolean premium = entitlementService.isPremium(userId);
+        ChargeResult charge = consumeQuotaOrCredit(trip, userId, premium);
         List<Activity> targets = replacementTargets(tripId, activity, selected);
         PlaceCache cache = selected.getPlaceCacheId() != null
                 ? placeCacheRepository.findById(selected.getPlaceCacheId()).orElse(null)
@@ -207,7 +213,7 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
         }
         return ReplaceActivityResponse.builder()
                 .activity(toActivityDetail(activity))
-                .freeSwapsRemaining(freeSwapsRemaining(trip))
+                .freeSwapsRemaining(freeSwapsRemaining(trip, premium))
                 .chargedUnits(charge.chargedUnits())
                 .chargedCredits(unitsToCredits(charge.chargedUnits()))
                 .aiCreditUnitsRemaining(remainingUnits)
@@ -259,28 +265,30 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
                 LocalDateTime.now());
     }
 
-    private ActivityAlternativesResponse emptyAlternativesResponse(Trip trip) {
+    private ActivityAlternativesResponse emptyAlternativesResponse(Trip trip, boolean premium) {
+        int chargeUnits = chargeUnitsIfApplied(trip, premium);
         return ActivityAlternativesResponse.builder()
-                .freeSwapsRemaining(freeSwapsRemaining(trip))
-                .chargeUnitsIfApplied(chargeUnitsIfApplied(trip))
-                .chargeCreditsIfApplied(unitsToCredits(chargeUnitsIfApplied(trip)))
+                .freeSwapsRemaining(freeSwapsRemaining(trip, premium))
+                .chargeUnitsIfApplied(chargeUnits)
+                .chargeCreditsIfApplied(unitsToCredits(chargeUnits))
                 .options(List.of())
                 .build();
     }
 
-    private ActivityAlternativesResponse toAlternativesResponse(ActivityAlternativeSession session, Trip trip) {
-        return toAlternativesResponse(session, trip, readOptions(session.getOptionsJson()));
+    private ActivityAlternativesResponse toAlternativesResponse(ActivityAlternativeSession session, Trip trip, boolean premium) {
+        return toAlternativesResponse(session, trip, readOptions(session.getOptionsJson()), premium);
     }
 
     private ActivityAlternativesResponse toAlternativesResponse(
             ActivityAlternativeSession session,
             Trip trip,
-            List<ActivityAlternativeOptionResponse> options) {
-        int chargeUnits = chargeUnitsIfApplied(trip);
+            List<ActivityAlternativeOptionResponse> options,
+            boolean premium) {
+        int chargeUnits = chargeUnitsIfApplied(trip, premium);
         return ActivityAlternativesResponse.builder()
                 .sessionId(session.getId())
                 .category(session.getCategory())
-                .freeSwapsRemaining(freeSwapsRemaining(trip))
+                .freeSwapsRemaining(freeSwapsRemaining(trip, premium))
                 .chargeUnitsIfApplied(chargeUnits)
                 .chargeCreditsIfApplied(unitsToCredits(chargeUnits))
                 .options(options)
@@ -589,8 +597,8 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
                 .build();
     }
 
-    private ChargeResult consumeQuotaOrCredit(Trip trip, Long userId) {
-        int limit = trip.getActivitySwapFreeLimit() != null ? trip.getActivitySwapFreeLimit() : 0;
+    private ChargeResult consumeQuotaOrCredit(Trip trip, Long userId, boolean premium) {
+        int limit = effectiveFreeLimit(trip, premium);
         int used = trip.getActivitySwapFreeUsed() != null ? trip.getActivitySwapFreeUsed() : 0;
         if (used < limit) {
             trip.setActivitySwapFreeUsed(used + 1);
@@ -911,14 +919,23 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
         return option > Math.round(current * 1.5);
     }
 
-    private int freeSwapsRemaining(Trip trip) {
-        int limit = trip.getActivitySwapFreeLimit() != null ? trip.getActivitySwapFreeLimit() : 0;
-        int used = trip.getActivitySwapFreeUsed() != null ? trip.getActivitySwapFreeUsed() : 0;
-        return Math.max(0, limit - used);
+    /**
+     * Quota đổi free hiệu lực = max(snapshot lúc tạo, premium hiện tại ? 4 : 0).
+     * → User nạp gói được 4 lượt free ngay cả trên chuyến tạo lúc còn Normal (limit snapshot=0),
+     * tránh trừ credit vừa nạp ngay từ lượt đầu. Chuyến Premium giữ snapshot 4 kể cả khi paid về 0.
+     */
+    private int effectiveFreeLimit(Trip trip, boolean premium) {
+        int snapshot = trip.getActivitySwapFreeLimit() != null ? trip.getActivitySwapFreeLimit() : 0;
+        return Math.max(snapshot, premium ? DEFAULT_LIMIT : 0);
     }
 
-    private int chargeUnitsIfApplied(Trip trip) {
-        return freeSwapsRemaining(trip) > 0 ? 0 : PAID_SWAP_UNITS;
+    private int freeSwapsRemaining(Trip trip, boolean premium) {
+        int used = trip.getActivitySwapFreeUsed() != null ? trip.getActivitySwapFreeUsed() : 0;
+        return Math.max(0, effectiveFreeLimit(trip, premium) - used);
+    }
+
+    private int chargeUnitsIfApplied(Trip trip, boolean premium) {
+        return freeSwapsRemaining(trip, premium) > 0 ? 0 : PAID_SWAP_UNITS;
     }
 
     private BigDecimal unitsToCredits(int units) {

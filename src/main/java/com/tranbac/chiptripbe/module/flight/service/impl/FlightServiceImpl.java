@@ -13,6 +13,7 @@ import com.tranbac.chiptripbe.module.geocoding.client.SerpApiClient;
 import com.tranbac.chiptripbe.module.geocoding.client.SerpApiClient.FlightOption;
 import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
+import com.tranbac.chiptripbe.module.user.service.EntitlementService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -38,12 +39,20 @@ class FlightServiceImpl implements FlightService {
     private final SerpApiClient serpApiClient;
     private final FlightCacheRepository flightCacheRepository;
     private final ObjectMapper objectMapper;
+    private final EntitlementService entitlementService;
 
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public FlightSuggestionResponse getFlightSuggestion(Long userId, Long tripId) {
         Trip trip = tripRepository.findByIdAndUserId(tripId, userId)
                 .orElseThrow(() -> AppException.forbidden("Bạn không có quyền với chuyến đi này"));
+
+        // Gợi ý vé máy bay là tính năng Premium — gate "createdAsPremium HOẶC premium hiện tại":
+        // snapshot tránh cliff; isPremium hiện tại cho phép dùng trên chuyến tạo lúc còn Normal sau khi nạp gói.
+        // Không tốn credit → mở khoá không trừ gì.
+        if (!trip.isGeneratedAsPremium() && !entitlementService.isPremium(userId)) {
+            throw AppException.premiumRequired();
+        }
 
         String depId = VietnamAirports.resolve(trip.getDeparture())
                 .orElseThrow(() -> AppException.badRequest("Chưa hỗ trợ sân bay cho điểm đi: " + trip.getDeparture()));
