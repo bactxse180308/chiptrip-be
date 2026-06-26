@@ -55,6 +55,8 @@ app:
     allowed-origins:
       - http://localhost:3000
       - http://localhost:5173
+      - https://chiptrip.online
+      - https://www.chiptrip.online
   google:
     client-id: ${GOOGLE_CLIENT_ID}
     client-secret: ${GOOGLE_CLIENT_SECRET}

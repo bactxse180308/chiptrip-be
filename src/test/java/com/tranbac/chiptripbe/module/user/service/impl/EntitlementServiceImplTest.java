@@ -52,7 +52,7 @@ class EntitlementServiceImplTest {
         EntitlementsResponse res = service.getEntitlements(USER_ID);
 
         assertEquals("NORMAL", res.getAccountType());
-        assertFalse(res.isPremium());
+        assertFalse(res.getIsPremium());
         assertEquals(3, res.getLimits().getMaxTripDays());
         assertEquals(2, res.getLimits().getMaxStyles());
         assertFalse(res.getLimits().isCanExportPdf());
@@ -69,7 +69,7 @@ class EntitlementServiceImplTest {
         EntitlementsResponse res = service.getEntitlements(USER_ID);
 
         assertEquals("PREMIUM", res.getAccountType());
-        assertTrue(res.isPremium());
+        assertTrue(res.getIsPremium());
         assertEquals(10, res.getLimits().getMaxTripDays());
         assertEquals(Integer.MAX_VALUE, res.getLimits().getMaxStyles());
         assertTrue(res.getLimits().isCanExportPdf());

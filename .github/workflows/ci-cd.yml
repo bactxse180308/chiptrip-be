@@ -1,0 +1,58 @@
+name: CI/CD
+
+# Push vào main  → build + test + deploy lên VPS.
+# Pull request   → chỉ build + test (không deploy).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build & test
+        run: |
+          chmod +x ./mvnw
+          ./mvnw -B clean package
+
+      # ───────── Deploy: chỉ khi push vào main ─────────
+      - name: Copy jar lên VPS
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: target/Chiptrip-be-0.0.1-SNAPSHOT.jar
+          target: /opt/app2/
+          strip_components: 1 # bỏ tiền tố target/ → upload thành /opt/app2/Chiptrip-be-0.0.1-SNAPSHOT.jar
+
+      - name: Swap jar + restart service
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/app2
+            cp app.jar "app.jar.bak.$(date +%s)" || true
+            mv Chiptrip-be-0.0.1-SNAPSHOT.jar app.jar
+            systemctl restart chiptrip-app2.service
+            sleep 20
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8081/actuator/health || true)
+            echo "Health check HTTP=$code (401 hoặc 200 = app đã sống)"
+            test "$code" = "401" -o "$code" = "200"
