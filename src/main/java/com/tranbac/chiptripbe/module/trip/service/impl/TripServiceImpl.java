@@ -370,10 +370,20 @@ class TripServiceImpl implements TripService {
     @Override
     @Transactional
     public TripDetailResponse cloneTrip(Long userId, Long tripId) {
-        Trip original = findTripByIdAndUserId(tripId, userId);
+        Trip original = tripRepository.findById(tripId)
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy chuyến đi"));
+        // Cho phép clone khi là chủ trip HOẶC trip đang công khai (Khám phá)
+        boolean isOwner = original.getUser().getId().equals(userId);
+        if (!isOwner && !original.isPublic()) {
+            throw AppException.forbidden("Bạn không có quyền với chuyến đi này");
+        }
+        User cloner = userRepository.findById(userId)
+                .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
 
+        // Bản sao là trip riêng tư mới của người clone — KHÔNG kế thừa isPublic/shareToken/
+        // inviteToken/likesCount/commentsCount (builder không set → mặc định false/null/0)
         Trip clone = Trip.builder()
-                .user(original.getUser())
+                .user(cloner)
                 .title(original.getTitle() + " (Copy)")
                 .departure(original.getDeparture())
                 .destination(original.getDestination())
@@ -384,7 +394,7 @@ class TripServiceImpl implements TripService {
                 .styles(original.getStyles())
                 .build();
         clone = tripRepository.save(clone);
-        tripMemberService.seedOwner(clone, original.getUser());
+        tripMemberService.seedOwner(clone, cloner);
 
         // Clone days and activities
         for (TripDay originalDay : original.getDays()) {
