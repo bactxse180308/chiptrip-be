@@ -31,6 +31,12 @@ public interface AiUsageRepository extends JpaRepository<AiUsage, Long>, JpaSpec
            "FROM AiUsage a WHERE a.createdAt >= :from AND a.createdAt <= :to")
     List<Object[]> aggregateForPeriod(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
+    @Query("SELECT YEAR(a.createdAt), MONTH(a.createdAt), DAY(a.createdAt), COUNT(a) " +
+           "FROM AiUsage a WHERE a.createdAt >= :from AND a.createdAt <= :to " +
+           "GROUP BY YEAR(a.createdAt), MONTH(a.createdAt), DAY(a.createdAt) " +
+           "ORDER BY YEAR(a.createdAt), MONTH(a.createdAt), DAY(a.createdAt)")
+    List<Object[]> countCallsByDay(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
+
     /** Set trip_id = NULL để tránh FK constraint khi xóa trip */
     @Modifying
     @Query("UPDATE AiUsage a SET a.trip = null WHERE a.trip.id = :tripId")

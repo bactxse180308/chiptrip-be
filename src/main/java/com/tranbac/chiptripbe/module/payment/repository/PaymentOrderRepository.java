@@ -22,6 +22,24 @@ public interface PaymentOrderRepository extends JpaRepository<PaymentOrder, Long
 
     boolean existsByOrderCode(String orderCode);
 
+    long countByStatus(OrderStatus status);
+
+    @Query("SELECT COALESCE(SUM(o.amountVnd), 0) " +
+           "FROM PaymentOrder o " +
+           "WHERE o.status = :status AND o.paidAt >= :from AND o.paidAt <= :to")
+    Long sumAmountVndByStatusAndPaidAtBetween(@Param("status") OrderStatus status,
+                                              @Param("from") LocalDateTime from,
+                                              @Param("to") LocalDateTime to);
+
+    /** Số đơn + doanh thu (VNĐ) theo từng ngày, lọc theo trạng thái và khoảng paidAt. */
+    @Query("SELECT YEAR(o.paidAt), MONTH(o.paidAt), DAY(o.paidAt), COUNT(o), COALESCE(SUM(o.amountVnd), 0) " +
+           "FROM PaymentOrder o WHERE o.status = :status AND o.paidAt >= :from AND o.paidAt <= :to " +
+           "GROUP BY YEAR(o.paidAt), MONTH(o.paidAt), DAY(o.paidAt) " +
+           "ORDER BY YEAR(o.paidAt), MONTH(o.paidAt), DAY(o.paidAt)")
+    List<Object[]> aggregateRevenueByDay(@Param("status") OrderStatus status,
+                                         @Param("from") LocalDateTime from,
+                                         @Param("to") LocalDateTime to);
+
     /**
      * Đánh dấu PAID atomic, chỉ khi đang PENDING (chống đối soát/cộng credit 2 lần khi
      * 2 giao dịch cùng trỏ về 1 order). Trả 1 nếu chuyển trạng thái thành công, 0 nếu đã PAID.

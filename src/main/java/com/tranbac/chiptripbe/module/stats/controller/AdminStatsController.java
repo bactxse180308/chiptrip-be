@@ -3,6 +3,7 @@ package com.tranbac.chiptripbe.module.stats.controller;
 import com.tranbac.chiptripbe.common.response.ApiResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.AiCostByProviderMonthResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DailyCountResponse;
+import com.tranbac.chiptripbe.module.stats.dto.response.DailyRevenueResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DashboardResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.EventCountResponse;
 import com.tranbac.chiptripbe.module.stats.service.AnalyticsService;
@@ -64,6 +65,24 @@ public class AdminStatsController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
         return ResponseEntity.ok(ApiResponse.ok(statsService.getAiCostByProviderMonth(from, to)));
+    }
+
+    @Operation(summary = "Doanh thu + số đơn PAID theo ngày (from/to tùy chọn, mặc định lấy tất cả)")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/revenue")
+    public ResponseEntity<ApiResponse<List<DailyRevenueResponse>>> getRevenueStats(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+        return ResponseEntity.ok(ApiResponse.ok(statsService.getRevenueByDay(from, to)));
+    }
+
+    @Operation(summary = "Số lượt gọi AI theo ngày (from/to tùy chọn, mặc định lấy tất cả)")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/ai-calls")
+    public ResponseEntity<ApiResponse<List<DailyCountResponse>>> getAiCallStats(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+        return ResponseEntity.ok(ApiResponse.ok(statsService.getAiCallsByDay(from, to)));
     }
 
     @Operation(summary = "PostHog: lượt xem trang ($pageview) theo ngày, N ngày gần nhất")

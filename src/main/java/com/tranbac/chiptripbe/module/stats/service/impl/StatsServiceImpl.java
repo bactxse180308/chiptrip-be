@@ -1,9 +1,12 @@
 package com.tranbac.chiptripbe.module.stats.service.impl;
 
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
+import com.tranbac.chiptripbe.module.payment.entity.OrderStatus;
+import com.tranbac.chiptripbe.module.payment.repository.PaymentOrderRepository;
 import com.tranbac.chiptripbe.module.place.repository.PlaceReviewRepository;
 import com.tranbac.chiptripbe.module.stats.dto.response.AiCostByProviderMonthResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DailyCountResponse;
+import com.tranbac.chiptripbe.module.stats.dto.response.DailyRevenueResponse;
 import com.tranbac.chiptripbe.module.stats.dto.response.DashboardResponse;
 import com.tranbac.chiptripbe.module.stats.service.StatsService;
 import com.tranbac.chiptripbe.module.trip.repository.TripCommentRepository;
@@ -36,6 +39,7 @@ class StatsServiceImpl implements StatsService {
     private final TripCommentRepository tripCommentRepository;
     private final PlaceReviewRepository placeReviewRepository;
     private final AiUsageRepository aiUsageRepository;
+    private final PaymentOrderRepository paymentOrderRepository;
 
     @Override
     public DashboardResponse getDashboard() {
@@ -50,6 +54,13 @@ class StatsServiceImpl implements StatsService {
         LocalDateTime startOfMonth = currentMonth.atDay(1).atStartOfDay();
         LocalDateTime endOfMonth = currentMonth.atEndOfMonth().atTime(LocalTime.MAX);
 
+        long totalOrders = paymentOrderRepository.countByStatus(OrderStatus.PAID);
+        Long revenueVndThisMonth = paymentOrderRepository.sumAmountVndByStatusAndPaidAtBetween(
+                OrderStatus.PAID,
+                startOfMonth,
+                endOfMonth
+        );
+
         Object[] aiStats = aiUsageRepository.aggregateForPeriod(startOfMonth, endOfMonth).get(0);
         BigDecimal aiCost = new BigDecimal(aiStats[0].toString());
         long aiCalls = ((Number) aiStats[1]).longValue();
@@ -62,8 +73,8 @@ class StatsServiceImpl implements StatsService {
                 .totalLikes(totalLikes)
                 .totalComments(totalComments)
                 .totalReviews(totalReviews)
-                .totalOrders(0)
-                .revenueVndThisMonth(BigDecimal.ZERO)
+                .totalOrders(totalOrders)
+                .revenueVndThisMonth(BigDecimal.valueOf(revenueVndThisMonth != null ? revenueVndThisMonth : 0L))
                 .aiCallsThisMonth(aiCalls)
                 .aiCostUsdThisMonth(aiCost)
                 .build();
@@ -113,6 +124,37 @@ class StatsServiceImpl implements StatsService {
                         .totalTokensIn(((Number) row[4]).longValue())
                         .totalTokensOut(((Number) row[5]).longValue())
                         .totalCostUsd(new BigDecimal(row[6].toString()))
+                        .build())
+                .toList();
+    }
+
+    @Override
+    public List<DailyRevenueResponse> getRevenueByDay(LocalDate from, LocalDate to) {
+        LocalDateTime start = (from != null ? from : DATE_MIN).atStartOfDay();
+        LocalDateTime end = (to != null ? to : LocalDate.now()).atTime(LocalTime.MAX);
+        return paymentOrderRepository.aggregateRevenueByDay(OrderStatus.PAID, start, end).stream()
+                .map(row -> DailyRevenueResponse.builder()
+                        .date(String.format("%04d-%02d-%02d",
+                                ((Number) row[0]).intValue(),
+                                ((Number) row[1]).intValue(),
+                                ((Number) row[2]).intValue()))
+                        .orders(((Number) row[3]).longValue())
+                        .revenueVnd(((Number) row[4]).longValue())
+                        .build())
+                .toList();
+    }
+
+    @Override
+    public List<DailyCountResponse> getAiCallsByDay(LocalDate from, LocalDate to) {
+        LocalDateTime start = (from != null ? from : DATE_MIN).atStartOfDay();
+        LocalDateTime end = (to != null ? to : LocalDate.now()).atTime(LocalTime.MAX);
+        return aiUsageRepository.countCallsByDay(start, end).stream()
+                .map(row -> DailyCountResponse.builder()
+                        .date(String.format("%04d-%02d-%02d",
+                                ((Number) row[0]).intValue(),
+                                ((Number) row[1]).intValue(),
+                                ((Number) row[2]).intValue()))
+                        .count(((Number) row[3]).longValue())
                         .build())
                 .toList();
     }
