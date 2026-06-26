@@ -410,6 +410,7 @@ public class SerpApiClient {
             Map<String, Object> resp = searchRequest(b -> b
                     .queryParam("engine", "google_hotels_reviews")
                     .queryParam("q", "hotel")
+                    .queryParam("hl", "vi")
                     .queryParam("property_token", propertyToken)
                     .queryParam("api_key", properties.getApiKey()));
 
@@ -516,6 +517,7 @@ public class SerpApiClient {
             log.info("SerpApi fetching reviews for dataId='{}'", dataId);
             Map<String, Object> resp = searchRequest(b -> {
                 b.queryParam("engine", "google_maps_reviews")
+                        .queryParam("hl", "vi")
                         .queryParam("api_key", properties.getApiKey());
                 if (dataId.startsWith("ChI")) {
                     b.queryParam("place_id", dataId);
