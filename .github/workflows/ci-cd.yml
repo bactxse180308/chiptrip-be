@@ -52,7 +52,7 @@ jobs:
             cp app.jar "app.jar.bak.$(date +%s)" || true
             mv Chiptrip-be-0.0.1-SNAPSHOT.jar app.jar
             systemctl restart chiptrip-app2.service
-            sleep 20
+            sleep 150
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8081/actuator/health || true)
             echo "Health check HTTP=$code (401 hoặc 200 = app đã sống)"
             test "$code" = "401" -o "$code" = "200"
