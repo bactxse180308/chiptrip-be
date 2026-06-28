@@ -66,7 +66,7 @@ app:
       model: gemini-3.1-pro-preview
       base-url: ${AI_BASE_URL}
     max-retries: 1
-    timeout-seconds: 90
+    timeout-seconds: 120
     pricing:
       input-usd-per-1m: 3.00
       output-usd-per-1m: 18.00

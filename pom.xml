@@ -98,6 +98,12 @@
             <artifactId>openhtmltopdf-pdfbox</artifactId>
             <version>1.1.37</version>
         </dependency>
+        <!-- Render mascot Chip (SVG vector) + gradient trong PDF lịch trình. -->
+        <dependency>
+            <groupId>io.github.openhtmltopdf</groupId>
+            <artifactId>openhtmltopdf-svg-support</artifactId>
+            <version>1.1.37</version>
+        </dependency>
 
         <dependency>
             <groupId>org.mapstruct</groupId>
