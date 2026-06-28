@@ -7,6 +7,7 @@ import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.service.AiItineraryValidator;
+import com.tranbac.chiptripbe.module.ai.service.AiKeyPool;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
 import jakarta.annotation.PostConstruct;
@@ -33,14 +34,15 @@ class AiGenerateServiceImpl implements AiService {
     private final AiProperties aiProperties;
     private final ObjectMapper objectMapper;
     private final AiItineraryValidator aiItineraryValidator;
+    private final AiKeyPool aiKeyPool;
 
     private WebClient aiApiClient;
 
     @PostConstruct
     void init() {
+        // Không gắn Authorization cố định: key set theo từng request để xoay vòng khi một key hết hạn mức.
         aiApiClient = webClientBuilder
                 .baseUrl(aiProperties.getOpenaiCompat().getBaseUrl())
-                .defaultHeader("Authorization", "Bearer " + aiProperties.getOpenaiCompat().getApiKey())
                 .defaultHeader("Content-Type", "application/json")
                 .build();
     }
@@ -48,10 +50,14 @@ class AiGenerateServiceImpl implements AiService {
     @Override
     public AiCallResult generateItinerary(GenerateTripRequest request, String userPreferences) {
         Map<String, Object> requestBody = buildRequest(request, userPreferences);
+        // Đủ lượt để xoay qua mọi key (khi quota) cộng thêm ngân sách retry cho lỗi tạm thời.
+        int maxAttempts = aiKeyPool.size() + aiProperties.getMaxRetries();
 
-        for (int attempt = 0; attempt <= aiProperties.getMaxRetries(); attempt++) {
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            String apiKey = aiKeyPool.current();
+            boolean lastAttempt = attempt == maxAttempts - 1;
             try {
-                Map<String, Object> response = callLlm(requestBody);
+                Map<String, Object> response = callLlm(requestBody, apiKey);
                 String content = extractContent(response);
                 AiItineraryResult itinerary = parseJson(content);
                 // Business validation — coi như retryable: nếu AI trả số ngày lệch / searchQuery generic,
@@ -68,13 +74,22 @@ class AiGenerateServiceImpl implements AiService {
                 log.error("Non-retryable AI error: {}", e.getMessage());
                 throw AppException.badRequest("Không thể tạo lịch trình: " + e.getMessage());
 
+            } catch (AiKeyExhaustedException e) {
+                aiKeyPool.rotate(apiKey);
+                if (lastAttempt) {
+                    log.error("AI generation failed: mọi key đều bị từ chối/hết hạn mức");
+                    throw AppException.internal("Hệ thống AI tạm hết lượt. Vui lòng thử lại sau.");
+                }
+                log.warn("Key AI bị từ chối (quota/invalid), đổi key và thử lại: {}", e.getMessage());
+                // đổi key → thử lại ngay, không backoff
+
             } catch (AiRetryableException | WebClientException e) {
-                if (attempt == aiProperties.getMaxRetries()) {
+                if (lastAttempt) {
                     log.error("AI generation failed after {} attempts", attempt + 1, e);
                     throw AppException.internal("AI không thể tạo lịch trình lúc này. Vui lòng thử lại sau.");
                 }
-                log.warn("AI attempt {}/{} failed, retrying: {}", attempt + 1, aiProperties.getMaxRetries() + 1, e.getMessage());
-                sleepBackoff(attempt);
+                log.warn("AI attempt {}/{} failed, retrying: {}", attempt + 1, maxAttempts, e.getMessage());
+                sleepBackoff(Math.min(attempt, aiProperties.getMaxRetries()));
             }
         }
 
@@ -304,15 +319,20 @@ class AiGenerateServiceImpl implements AiService {
 
     // ─── HTTP call ────────────────────────────────────────────────────────────
 
-    private Map<String, Object> callLlm(Map<String, Object> body) {
+    private Map<String, Object> callLlm(Map<String, Object> body, String apiKey) {
         return aiApiClient.post()
                 .uri("/chat/completions")
+                .header("Authorization", "Bearer " + apiKey)
                 .bodyValue(body)
                 .retrieve()
-                .onStatus(status -> status.value() == 400 || status.value() == 401 || status.value() == 403,
+                .onStatus(status -> status.value() == 429 || status.value() == 401 || status.value() == 403,
+                        response -> response.bodyToMono(String.class)
+                                .map(errorBody -> (Throwable) new AiKeyExhaustedException(
+                                        "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
+                .onStatus(status -> status.value() == 400,
                         response -> response.bodyToMono(String.class)
                                 .map(errorBody -> (Throwable) new AiNonRetryableException(
-                                        "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
+                                        "AI HTTP 400: " + errorBody)))
                 .onStatus(status -> status.is4xxClientError() || status.is5xxServerError(),
                         response -> response.bodyToMono(String.class)
                                 .map(errorBody -> (Throwable) new AiRetryableException(
@@ -382,5 +402,10 @@ class AiGenerateServiceImpl implements AiService {
 
     static class AiNonRetryableException extends RuntimeException {
         AiNonRetryableException(String msg) { super(msg); }
+    }
+
+    /** Key bị từ chối (429 quota / 401-403 invalid) → xoay sang key khác rồi thử lại. */
+    static class AiKeyExhaustedException extends RuntimeException {
+        AiKeyExhaustedException(String msg) { super(msg); }
     }
 }

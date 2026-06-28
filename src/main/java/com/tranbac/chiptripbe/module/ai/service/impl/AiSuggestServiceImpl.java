@@ -9,6 +9,7 @@ import com.tranbac.chiptripbe.module.ai.dto.request.SuggestDestinationsRequest;
 import com.tranbac.chiptripbe.module.ai.dto.response.DestinationSuggestion;
 import com.tranbac.chiptripbe.module.ai.entity.AiUsage;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
+import com.tranbac.chiptripbe.module.ai.service.AiKeyPool;
 import com.tranbac.chiptripbe.module.ai.service.AiSuggestService;
 import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
@@ -39,14 +40,15 @@ class AiSuggestServiceImpl implements AiSuggestService {
     private final ObjectMapper objectMapper;
     private final AiUsageRepository aiUsageRepository;
     private final UserRepository userRepository;
+    private final AiKeyPool aiKeyPool;
 
     private WebClient aiApiClient;
 
     @PostConstruct
     void init() {
+        // Không gắn Authorization cố định: key set theo từng request để xoay vòng khi một key hết hạn mức.
         aiApiClient = webClientBuilder
                 .baseUrl(aiProperties.getOpenaiCompat().getBaseUrl())
-                .defaultHeader("Authorization", "Bearer " + aiProperties.getOpenaiCompat().getApiKey())
                 .defaultHeader("Content-Type", "application/json")
                 .build();
     }
@@ -55,10 +57,14 @@ class AiSuggestServiceImpl implements AiSuggestService {
     @Transactional
     public List<DestinationSuggestion> suggest(Long userId, SuggestDestinationsRequest request) {
         Map<String, Object> body = buildRequest(request);
+        // Đủ lượt để xoay qua mọi key (khi quota) cộng thêm ngân sách retry cho lỗi tạm thời.
+        int maxAttempts = aiKeyPool.size() + aiProperties.getMaxRetries();
 
-        for (int attempt = 0; attempt <= aiProperties.getMaxRetries(); attempt++) {
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            String apiKey = aiKeyPool.current();
+            boolean lastAttempt = attempt == maxAttempts - 1;
             try {
-                Map<String, Object> response = callLlm(body);
+                Map<String, Object> response = callLlm(body, apiKey);
                 String content = extractContent(response);
                 List<DestinationSuggestion> suggestions = parseAndValidate(content);
                 logUsage(userId, response);
@@ -68,14 +74,23 @@ class AiSuggestServiceImpl implements AiSuggestService {
                 log.error("Non-retryable AI suggest error: {}", e.getMessage());
                 throw AppException.badRequest("Không thể gợi ý điểm đến: " + e.getMessage());
 
+            } catch (SuggestKeyExhaustedException e) {
+                aiKeyPool.rotate(apiKey);
+                if (lastAttempt) {
+                    log.error("AI suggest failed: mọi key đều bị từ chối/hết hạn mức");
+                    throw AppException.internal("Hệ thống AI tạm hết lượt. Vui lòng thử lại sau.");
+                }
+                log.warn("Key AI bị từ chối (quota/invalid), đổi key và thử lại: {}", e.getMessage());
+                // đổi key → thử lại ngay, không backoff
+
             } catch (SuggestRetryableException | WebClientException e) {
-                if (attempt == aiProperties.getMaxRetries()) {
+                if (lastAttempt) {
                     log.error("AI suggest failed after {} attempts", attempt + 1, e);
                     throw AppException.internal("AI không thể gợi ý điểm đến lúc này. Vui lòng thử lại sau.");
                 }
                 log.warn("AI suggest attempt {}/{} failed, retrying: {}",
-                        attempt + 1, aiProperties.getMaxRetries() + 1, e.getMessage());
-                sleepBackoff(attempt);
+                        attempt + 1, maxAttempts, e.getMessage());
+                sleepBackoff(Math.min(attempt, aiProperties.getMaxRetries()));
             }
         }
         throw AppException.internal("AI suggest failed");
@@ -131,15 +146,20 @@ class AiSuggestServiceImpl implements AiSuggestService {
 
     // ─── HTTP call ──────────────────────────────────────────────────────────
 
-    private Map<String, Object> callLlm(Map<String, Object> body) {
+    private Map<String, Object> callLlm(Map<String, Object> body, String apiKey) {
         return aiApiClient.post()
                 .uri("/chat/completions")
+                .header("Authorization", "Bearer " + apiKey)
                 .bodyValue(body)
                 .retrieve()
-                .onStatus(status -> status.value() == 400 || status.value() == 401 || status.value() == 403,
+                .onStatus(status -> status.value() == 429 || status.value() == 401 || status.value() == 403,
+                        response -> response.bodyToMono(String.class)
+                                .map(errorBody -> (Throwable) new SuggestKeyExhaustedException(
+                                        "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
+                .onStatus(status -> status.value() == 400,
                         response -> response.bodyToMono(String.class)
                                 .map(errorBody -> (Throwable) new SuggestNonRetryableException(
-                                        "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
+                                        "AI HTTP 400: " + errorBody)))
                 .onStatus(status -> status.is4xxClientError() || status.is5xxServerError(),
                         response -> response.bodyToMono(String.class)
                                 .map(errorBody -> (Throwable) new SuggestRetryableException(
@@ -222,7 +242,7 @@ class AiSuggestServiceImpl implements AiSuggestService {
         User user = userRepository.getReferenceById(userId);
         aiUsageRepository.save(AiUsage.builder()
                 .user(user)
-                .provider("gemini-3.1-pro-preview")
+                .provider("gemini")
                 .tokensIn(promptTokens)
                 .tokensOut(completionTokens)
                 .costUsd(costUsd)
@@ -237,5 +257,10 @@ class AiSuggestServiceImpl implements AiSuggestService {
 
     static class SuggestNonRetryableException extends RuntimeException {
         SuggestNonRetryableException(String msg) { super(msg); }
+    }
+
+    /** Key bị từ chối (429 quota / 401-403 invalid) → xoay sang key khác rồi thử lại. */
+    static class SuggestKeyExhaustedException extends RuntimeException {
+        SuggestKeyExhaustedException(String msg) { super(msg); }
     }
 }

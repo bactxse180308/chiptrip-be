@@ -5,6 +5,9 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Component
 @ConfigurationProperties(prefix = "app.ai")
 @Getter
@@ -19,8 +22,9 @@ public class AiProperties {
     @Getter
     @Setter
     public static class OpenAiCompat {
-        private String apiKey;
-        private String model = "gemini-3.1-pro-preview";
+        /** Nhiều API key Gemini (ngăn bởi dấu phẩy ở AI_API_KEYS) để tự xoay vòng khi một key hết hạn mức. */
+        private List<String> apiKeys = new ArrayList<>();
+        private String model = "gemini-2.5-flash";
         private String baseUrl;
     }
 

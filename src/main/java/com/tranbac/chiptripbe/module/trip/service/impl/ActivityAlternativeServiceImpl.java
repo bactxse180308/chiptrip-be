@@ -7,6 +7,7 @@ import com.tranbac.chiptripbe.common.config.AiProperties;
 import com.tranbac.chiptripbe.common.enums.ActivityType;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.ai.dto.AiActivityAlternativesResult;
+import com.tranbac.chiptripbe.module.ai.service.AiKeyPool;
 import com.tranbac.chiptripbe.module.ai.service.AiUsageService;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
@@ -87,14 +88,15 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
     private final AiProperties aiProperties;
     private final ObjectMapper objectMapper;
     private final AiUsageService aiUsageService;
+    private final AiKeyPool aiKeyPool;
 
     private WebClient aiApiClient;
 
     @PostConstruct
     void init() {
+        // Không gắn Authorization cố định: key set theo từng request để xoay vòng khi một key hết hạn mức.
         aiApiClient = webClientBuilder
                 .baseUrl(aiProperties.getOpenaiCompat().getBaseUrl())
-                .defaultHeader("Authorization", "Bearer " + aiProperties.getOpenaiCompat().getApiKey())
                 .defaultHeader("Content-Type", "application/json")
                 .build();
     }
@@ -321,21 +323,33 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
 
     private AiAlternativeCallResult callAi(AlternativeContext context, ActivityAlternativeCategory category) {
         Map<String, Object> requestBody = buildAiRequest(context, category);
-        for (int attempt = 0; attempt <= aiProperties.getMaxRetries(); attempt++) {
+        // Đủ lượt để xoay qua mọi key (khi quota) cộng thêm ngân sách retry cho lỗi tạm thời.
+        int maxAttempts = aiKeyPool.size() + aiProperties.getMaxRetries();
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            String apiKey = aiKeyPool.current();
+            boolean lastAttempt = attempt == maxAttempts - 1;
             try {
-                Map<String, Object> response = callLlm(requestBody);
+                Map<String, Object> response = callLlm(requestBody, apiKey);
                 String content = extractContent(response);
                 AiActivityAlternativesResult result = parseJson(content);
                 int[] tokens = extractTokenCount(response);
                 return new AiAlternativeCallResult(result, tokens[0], tokens[1]);
             } catch (AiNonRetryableException e) {
                 throw AppException.badRequest("Khong the tao goi y thay the: " + e.getMessage());
+            } catch (AiKeyExhaustedException e) {
+                aiKeyPool.rotate(apiKey);
+                if (lastAttempt) {
+                    log.error("Activity alternatives AI failed: moi key deu bi tu choi/het han muc");
+                    throw AppException.internal("He thong AI tam het luot. Vui long thu lai sau.");
+                }
+                log.warn("Key AI bi tu choi (quota/invalid), doi key va thu lai: {}", e.getMessage());
+                // doi key → thu lai ngay, khong backoff
             } catch (AiRetryableException | WebClientException e) {
-                if (attempt == aiProperties.getMaxRetries()) {
+                if (lastAttempt) {
                     log.error("Activity alternatives AI failed after {} attempts", attempt + 1, e);
                     throw AppException.internal("AI khong the tao goi y thay the luc nay. Vui long thu lai sau.");
                 }
-                sleepBackoff(attempt);
+                sleepBackoff(Math.min(attempt, aiProperties.getMaxRetries()));
             }
         }
         throw AppException.internal("AI alternatives failed");
@@ -689,15 +703,20 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
                 .build();
     }
 
-    private Map<String, Object> callLlm(Map<String, Object> body) {
+    private Map<String, Object> callLlm(Map<String, Object> body, String apiKey) {
         return aiApiClient.post()
                 .uri("/chat/completions")
+                .header("Authorization", "Bearer " + apiKey)
                 .bodyValue(body)
                 .retrieve()
-                .onStatus(status -> status.value() == 400 || status.value() == 401 || status.value() == 403,
+                .onStatus(status -> status.value() == 429 || status.value() == 401 || status.value() == 403,
+                        response -> response.bodyToMono(String.class)
+                                .map(errorBody -> (Throwable) new AiKeyExhaustedException(
+                                        "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
+                .onStatus(status -> status.value() == 400,
                         response -> response.bodyToMono(String.class)
                                 .map(errorBody -> (Throwable) new AiNonRetryableException(
-                                        "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
+                                        "AI HTTP 400: " + errorBody)))
                 .onStatus(status -> status.is4xxClientError() || status.is5xxServerError(),
                         response -> response.bodyToMono(String.class)
                                 .map(errorBody -> (Throwable) new AiRetryableException(
@@ -1111,5 +1130,10 @@ class ActivityAlternativeServiceImpl implements ActivityAlternativeService {
 
     private static class AiNonRetryableException extends RuntimeException {
         AiNonRetryableException(String message) { super(message); }
+    }
+
+    /** Key bị từ chối (429 quota / 401-403 invalid) → xoay sang key khác rồi thử lại. */
+    private static class AiKeyExhaustedException extends RuntimeException {
+        AiKeyExhaustedException(String message) { super(message); }
     }
 }

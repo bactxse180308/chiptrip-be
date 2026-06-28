@@ -62,14 +62,17 @@ app:
     client-secret: ${GOOGLE_CLIENT_SECRET}
   ai:
     openai-compat:
-      api-key: ${AI_API_KEY}
-      model: gemini-3.1-pro-preview
+      # Nhiều key ngăn bởi dấu phẩy: AI_API_KEYS=key1,key2,key3 (tự xoay khi 429/401/403).
+      # Tương thích ngược: nếu không đặt AI_API_KEYS thì dùng AI_API_KEY (1 key).
+      api-keys: ${AI_API_KEYS:${AI_API_KEY:}}
+      model: gemini-2.5-flash
       base-url: ${AI_BASE_URL}
     max-retries: 1
     timeout-seconds: 120
     pricing:
-      input-usd-per-1m: 3.00
-      output-usd-per-1m: 18.00
+      # Giá gemini-2.5-flash (USD/1M token) — dùng để ghi cost vào ai_usages.
+      input-usd-per-1m: 0.30
+      output-usd-per-1m: 2.50
   goong:
     api-key: ${GOONG_API_KEY}
     base-url: https://rsapi.goong.io
