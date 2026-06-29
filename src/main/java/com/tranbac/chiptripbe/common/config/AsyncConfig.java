@@ -27,4 +27,22 @@ public class AsyncConfig {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * Pool riêng cho worker sinh lịch trình bất đồng bộ (generate-async). Mỗi job giữ 1 thread
+     * trong suốt ~30-90s và bản thân nó còn submit tiếp vào enrichmentExecutor để geocode —
+     * nên PHẢI tách pool, không dùng chung enrichmentExecutor (tránh self-starve/deadlock).
+     */
+    @Bean("tripGenerateExecutor")
+    public Executor tripGenerateExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("trip-gen-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
+        executor.initialize();
+        return executor;
+    }
 }

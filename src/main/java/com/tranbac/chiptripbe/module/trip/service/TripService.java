@@ -15,6 +15,12 @@ public interface TripService {
 
     TripGenerateResponse generateTrip(Long userId, GenerateTripRequest request);
 
+    /**
+     * Chạy fail-fast các kiểm tra (giới hạn tier, ngày, còn lượt AI) đồng bộ trước khi
+     * giao việc nặng cho worker bất đồng bộ — để controller trả ngay 402/400/403 và dính rate limit.
+     */
+    void validateGenerateRequest(Long userId, GenerateTripRequest request);
+
     Page<TripSummaryResponse> getMyTrips(Long userId, Pageable pageable);
 
     TripDetailResponse getTripDetail(Long userId, Long tripId);

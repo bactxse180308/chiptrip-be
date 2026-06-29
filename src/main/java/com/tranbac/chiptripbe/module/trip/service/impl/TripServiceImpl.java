@@ -112,6 +112,12 @@ class TripServiceImpl implements TripService {
                 userId, request, aiCallResult, resolvedPlaces);
     }
 
+    @Override
+    public void validateGenerateRequest(Long userId, GenerateTripRequest request) {
+        // Tái dùng đúng các kiểm tra fail-fast của luồng sync (không trừ credit ở đây).
+        validateRequestAndCredits(userId, request);
+    }
+
     /**
      * Read-only, TRƯỚC khi gọi Gemini (fail-fast). KHÔNG trừ credit ở đây — nguồn chân lý là
      * lần deduct atomic trong persist (CREDIT_PREMIUM_SPEC.md Mục 5.5).

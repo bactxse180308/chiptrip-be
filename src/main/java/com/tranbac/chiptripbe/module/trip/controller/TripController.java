@@ -11,6 +11,7 @@ import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
 import com.tranbac.chiptripbe.module.trip.service.TripExportService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
+import com.tranbac.chiptripbe.module.trip.service.impl.AsyncTripGenerator;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -34,6 +35,7 @@ public class TripController {
 
     private final TripService tripService;
     private final TripExportService tripExportService;
+    private final AsyncTripGenerator asyncTripGenerator;
 
     @Operation(summary = "Sinh lịch trình bằng AI (trừ 1 lượt AI)")
     @SecurityRequirement(name = "bearerAuth")
@@ -44,6 +46,26 @@ public class TripController {
             @Valid @RequestBody GenerateTripRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponse.created(tripService.generateTrip(principal.getId(), request)));
+    }
+
+    @Operation(summary = "Sinh lịch trình bằng AI (bất đồng bộ — kết quả đẩy qua WebSocket /user/queue/trip-generation)")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/generate-async")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public ResponseEntity<ApiResponse<Void>> generateTripAsync(
+            @AuthenticationPrincipal UserPrincipal principal,
+            @Valid @RequestBody GenerateTripRequest request) {
+        // Validate đồng bộ để fail-fast (402/400/403) + dính rate limit; việc nặng chạy ở luồng nền.
+        Long userId = principal.getId();
+        tripService.validateGenerateRequest(userId, request);
+        asyncTripGenerator.begin(userId);   // 409 nếu user đang có job generate khác chạy → chống tạo trùng/trừ trùng
+        try {
+            asyncTripGenerator.run(userId, request);
+        } catch (RuntimeException e) {
+            asyncTripGenerator.release(userId);   // submit async thất bại → nhả khóa, không kẹt
+            throw e;
+        }
+        return ResponseEntity.accepted().body(ApiResponse.noContent());
     }
 
     @Operation(summary = "Danh sách chuyến đi của tôi")

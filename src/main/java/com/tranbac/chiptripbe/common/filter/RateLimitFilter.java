@@ -107,6 +107,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
             if (uri.endsWith("/api/v1/auth/register")) return Category.REGISTER;
             if (uri.endsWith("/api/v1/auth/forgot-password")) return Category.FORGOT;
             if (uri.endsWith("/api/v1/trips/generate")) return Category.GENERATE;
+            if (uri.endsWith("/api/v1/trips/generate-async")) return Category.GENERATE;
         }
         return Category.DEFAULT;
     }
