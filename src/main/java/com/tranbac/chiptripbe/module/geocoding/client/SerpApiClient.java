@@ -9,6 +9,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.util.UriBuilder;
 
 import java.math.BigDecimal;
@@ -40,6 +41,7 @@ public class SerpApiClient {
     private final WebClient.Builder webClientBuilder;
     private final SerpApiProperties properties;
     private final ObjectMapper objectMapper;
+    private final SerpApiKeyPool keyPool;
 
     private WebClient client;
 
@@ -60,37 +62,82 @@ public class SerpApiClient {
     }
 
     /**
-     * Gọi GET /search có throttle: chờ slot tối đa timeoutSeconds, hết slot → trả null (caller fail-soft).
-     * Lỗi HTTP (kể cả 429) để nguyên cho caller bắt; permit luôn được release ở finally.
+     * Gọi GET /search có throttle (xem {@link #executeSearch}). Caller KHÔNG cần truyền api_key —
+     * pool tự gắn key và xoay vòng khi key hết lượt.
      */
     private Map<String, Object> searchRequest(Consumer<UriBuilder> params) {
+        return executeSearch(params, true);
+    }
+
+    /**
+     * Gọi GET /search với cơ chế xoay vòng key: tự gắn api_key từ {@link SerpApiKeyPool},
+     * gặp 401 (key sai/hết lượt) hoặc body báo "out of searches" → đánh dấu key đó exhausted
+     * rồi thử key kế tiếp. Hết key khả dụng → trả null (caller fail-soft về Goong).
+     *
+     * throttle=true: chờ slot Semaphore tối đa ≈ nửa HTTP timeout, hết slot → null.
+     * Lỗi HTTP khác 401 (429/5xx/timeout) để nguyên cho caller bắt; permit luôn release ở finally.
+     */
+    private Map<String, Object> executeSearch(Consumer<UriBuilder> params, boolean throttle) {
+        List<String> keys = keyPool.availableKeys();
+        if (keys.isEmpty()) {
+            log.warn("SerpApi: không còn key khả dụng (chưa cấu hình hoặc tất cả đang cooldown) — bỏ qua request");
+            return null;
+        }
         boolean acquired = false;
         // Chờ slot ngắn (≈ nửa HTTP timeout): khi hàng đợi đầy thì fail nhanh về Goong fallback
         // thay vì mỗi thread đốt trọn timeoutSeconds chỉ để chờ slot rồi vượt deadline enrichment.
         long acquireWaitSeconds = Math.max(1, properties.getTimeoutSeconds() / 2);
         try {
-            acquired = rateLimiter.tryAcquire(acquireWaitSeconds, TimeUnit.SECONDS);
-            if (!acquired) {
-                log.warn("SerpApi throttle: hết slot ({} đồng thời) sau {}s — bỏ qua request",
-                        properties.getMaxConcurrent(), acquireWaitSeconds);
-                return null;
+            if (throttle) {
+                acquired = rateLimiter.tryAcquire(acquireWaitSeconds, TimeUnit.SECONDS);
+                if (!acquired) {
+                    log.warn("SerpApi throttle: hết slot ({} đồng thời) sau {}s — bỏ qua request",
+                            properties.getMaxConcurrent(), acquireWaitSeconds);
+                    return null;
+                }
             }
-            return client.get()
-                    .uri(b -> {
-                        b.path("/search");
-                        params.accept(b);
-                        return b.build();
-                    })
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            for (String key : keys) {
+                try {
+                    Map<String, Object> resp = client.get()
+                            .uri(b -> {
+                                b.path("/search");
+                                params.accept(b);
+                                b.queryParam("api_key", key);
+                                return b.build();
+                            })
+                            .retrieve()
+                            .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                            .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                            .block();
+                    if (resp != null && isQuotaError(resp.get("error"))) {
+                        keyPool.markExhausted(key);
+                        continue; // thử key kế tiếp
+                    }
+                    return resp;
+                } catch (WebClientResponseException e) {
+                    if (e.getStatusCode().value() == 401) {
+                        keyPool.markExhausted(key);
+                        // 401 = key sai hoặc hết lượt → thử key kế tiếp
+                    } else {
+                        throw e; // 429/5xx... để caller fail-soft, đừng đốt thêm key
+                    }
+                }
+            }
+            log.warn("SerpApi: đã thử hết {} key khả dụng nhưng đều 401/hết lượt — bỏ qua request", keys.size());
+            return null;
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             return null;
         } finally {
             if (acquired) rateLimiter.release();
         }
+    }
+
+    /** Body SerpApi có field "error" báo hết lượt (status 200 nhưng vẫn fail). */
+    private static boolean isQuotaError(Object error) {
+        if (!(error instanceof String s)) return false;
+        String lower = s.toLowerCase();
+        return lower.contains("run out") || lower.contains("ran out") || lower.contains("out of searches");
     }
 
     /**
@@ -125,7 +172,7 @@ public class SerpApiClient {
     @SuppressWarnings("unchecked")
     public List<PlaceData> searchPlaceCandidates(String query) {
         if (!properties.isEnabled()) return List.of();
-        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (!keyPool.hasKeys()) return List.of();
         if (query == null || query.isBlank()) return List.of();
 
         try {
@@ -134,8 +181,7 @@ public class SerpApiClient {
                     .queryParam("engine", "google_maps")
                     .queryParam("type", "search")
                     .queryParam("q", query)
-                    .queryParam("hl", "vi")
-                    .queryParam("api_key", properties.getApiKey()));
+                    .queryParam("hl", "vi"));
 
             if (resp == null) return List.of();
 
@@ -195,7 +241,7 @@ public class SerpApiClient {
     @SuppressWarnings("unchecked")
     public Optional<HotelData> searchHotel(String name, LocalDate checkIn, LocalDate checkOut, Integer adults) {
         if (!properties.isEnabled()) return Optional.empty();
-        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return Optional.empty();
+        if (!keyPool.hasKeys()) return Optional.empty();
         if (name == null || name.isBlank()) return Optional.empty();
         if (checkIn == null || checkOut == null || !checkOut.isAfter(checkIn)) return Optional.empty();
 
@@ -209,8 +255,7 @@ public class SerpApiClient {
                     .queryParam("adults", adults != null ? adults.toString() : "2")
                     .queryParam("currency", "VND")
                     .queryParam("gl", "vn")
-                    .queryParam("hl", "vi")
-                    .queryParam("api_key", properties.getApiKey()));
+                    .queryParam("hl", "vi"));
 
             if (resp == null) return Optional.empty();
             List<Map<String, Object>> hotels = (List<Map<String, Object>>) resp.get("properties");
@@ -291,7 +336,7 @@ public class SerpApiClient {
      */
     @SuppressWarnings("unchecked")
     public Optional<HotelBooking> fetchHotelDetails(String propertyToken, LocalDate checkIn, LocalDate checkOut, Integer adults) {
-        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) return Optional.empty();
+        if (!properties.isEnabled() || !keyPool.hasKeys()) return Optional.empty();
         if (propertyToken == null || propertyToken.isBlank()) return Optional.empty();
         if (checkIn == null || checkOut == null || !checkOut.isAfter(checkIn)) return Optional.empty();
 
@@ -306,8 +351,7 @@ public class SerpApiClient {
                     .queryParam("adults", adults != null ? adults.toString() : "2")
                     .queryParam("currency", "VND")
                     .queryParam("gl", "vn")
-                    .queryParam("hl", "vi")
-                    .queryParam("api_key", properties.getApiKey()));
+                    .queryParam("hl", "vi"));
 
             if (resp == null) return Optional.empty();
 
@@ -361,7 +405,7 @@ public class SerpApiClient {
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, String>> fetchHotelPhotos(String propertyToken) {
-        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (!properties.isEnabled() || !keyPool.hasKeys()) return List.of();
         if (propertyToken == null || propertyToken.isBlank()) return List.of();
 
         try {
@@ -369,8 +413,7 @@ public class SerpApiClient {
             Map<String, Object> resp = searchRequest(b -> b
                     .queryParam("engine", "google_hotels_photos")
                     .queryParam("q", "hotel")
-                    .queryParam("property_token", propertyToken)
-                    .queryParam("api_key", properties.getApiKey()));
+                    .queryParam("property_token", propertyToken));
 
             if (resp == null) return List.of();
 
@@ -402,7 +445,7 @@ public class SerpApiClient {
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> fetchHotelReviews(String propertyToken) {
-        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (!properties.isEnabled() || !keyPool.hasKeys()) return List.of();
         if (propertyToken == null || propertyToken.isBlank()) return List.of();
 
         try {
@@ -411,8 +454,7 @@ public class SerpApiClient {
                     .queryParam("engine", "google_hotels_reviews")
                     .queryParam("q", "hotel")
                     .queryParam("hl", "vi")
-                    .queryParam("property_token", propertyToken)
-                    .queryParam("api_key", properties.getApiKey()));
+                    .queryParam("property_token", propertyToken));
 
             if (resp == null) return List.of();
 
@@ -463,7 +505,7 @@ public class SerpApiClient {
     @SuppressWarnings("unchecked")
     public List<Map<String, String>> fetchPhotos(String id) {
         if (!properties.isEnabled()) return List.of();
-        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (!keyPool.hasKeys()) return List.of();
         if (id == null || id.isBlank()) return List.of();
         if (id.startsWith("ChI")) {
             log.debug("SerpApi fetchPhotos: id='{}' là place_id, không hợp lệ cho google_maps_photos — skip", id);
@@ -474,8 +516,7 @@ public class SerpApiClient {
             log.info("SerpApi fetching photos for dataId='{}'", id);
             Map<String, Object> resp = searchRequest(b -> b
                     .queryParam("engine", "google_maps_photos")
-                    .queryParam("data_id", id)
-                    .queryParam("api_key", properties.getApiKey()));
+                    .queryParam("data_id", id));
 
             if (resp == null) return List.of();
 
@@ -510,15 +551,14 @@ public class SerpApiClient {
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> fetchReviews(String dataId) {
         if (!properties.isEnabled()) return List.of();
-        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) return List.of();
+        if (!keyPool.hasKeys()) return List.of();
         if (dataId == null || dataId.isBlank()) return List.of();
 
         try {
             log.info("SerpApi fetching reviews for dataId='{}'", dataId);
             Map<String, Object> resp = searchRequest(b -> {
                 b.queryParam("engine", "google_maps_reviews")
-                        .queryParam("hl", "vi")
-                        .queryParam("api_key", properties.getApiKey());
+                        .queryParam("hl", "vi");
                 if (dataId.startsWith("ChI")) {
                     b.queryParam("place_id", dataId);
                 } else {
@@ -666,27 +706,19 @@ public class SerpApiClient {
         try {
             log.info("SerpApi google_flights {}->{} {}{} token={}", departureId, arrivalId, outbound,
                     roundTrip ? (".." + returnDate) : " (one-way)", departureToken != null);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> {
-                        var u = b.path("/search")
-                                .queryParam("engine", "google_flights")
-                                .queryParam("departure_id", departureId)
-                                .queryParam("arrival_id", arrivalId)
-                                .queryParam("outbound_date", outbound.format(HOTEL_DATE_FORMAT))
-                                .queryParam("type", roundTrip ? "1" : "2")
-                                .queryParam("adults", adults != null ? adults.toString() : "1")
-                                .queryParam("currency", "VND")
-                                .queryParam("gl", "vn")
-                                .queryParam("hl", "vi")
-                                .queryParam("api_key", properties.getApiKey());
-                        if (roundTrip) u.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
-                        if (departureToken != null && !departureToken.isBlank()) u.queryParam("departure_token", departureToken);
-                        return u.build();
-                    })
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = executeSearch(b -> {
+                b.queryParam("engine", "google_flights")
+                        .queryParam("departure_id", departureId)
+                        .queryParam("arrival_id", arrivalId)
+                        .queryParam("outbound_date", outbound.format(HOTEL_DATE_FORMAT))
+                        .queryParam("type", roundTrip ? "1" : "2")
+                        .queryParam("adults", adults != null ? adults.toString() : "1")
+                        .queryParam("currency", "VND")
+                        .queryParam("gl", "vn")
+                        .queryParam("hl", "vi");
+                if (roundTrip) b.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
+                if (departureToken != null && !departureToken.isBlank()) b.queryParam("departure_token", departureToken);
+            }, false);
             if (resp == null) return List.of();
             List<FlightOption> options = new ArrayList<>();
             parseFlightArray(resp.get("best_flights"), options);
@@ -750,27 +782,19 @@ public class SerpApiClient {
         boolean roundTrip = returnDate != null && returnDate.isAfter(outbound);
         try {
             log.info("SerpApi google_flights booking options {}->{}", departureId, arrivalId);
-            Map<String, Object> resp = client.get()
-                    .uri(b -> {
-                        var u = b.path("/search")
-                                .queryParam("engine", "google_flights")
-                                .queryParam("departure_id", departureId)
-                                .queryParam("arrival_id", arrivalId)
-                                .queryParam("outbound_date", outbound.format(HOTEL_DATE_FORMAT))
-                                .queryParam("type", roundTrip ? "1" : "2")
-                                .queryParam("adults", adults != null ? adults.toString() : "1")
-                                .queryParam("currency", "VND")
-                                .queryParam("gl", "vn")
-                                .queryParam("hl", "vi")
-                                .queryParam("booking_token", bookingToken)
-                                .queryParam("api_key", properties.getApiKey());
-                        if (roundTrip) u.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
-                        return u.build();
-                    })
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = executeSearch(b -> {
+                b.queryParam("engine", "google_flights")
+                        .queryParam("departure_id", departureId)
+                        .queryParam("arrival_id", arrivalId)
+                        .queryParam("outbound_date", outbound.format(HOTEL_DATE_FORMAT))
+                        .queryParam("type", roundTrip ? "1" : "2")
+                        .queryParam("adults", adults != null ? adults.toString() : "1")
+                        .queryParam("currency", "VND")
+                        .queryParam("gl", "vn")
+                        .queryParam("hl", "vi")
+                        .queryParam("booking_token", bookingToken);
+                if (roundTrip) b.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
+            }, false);
             if (resp == null) return List.of();
             List<FlightBookingOption> result = new ArrayList<>();
             if (resp.get("booking_options") instanceof List<?> opts) {
@@ -793,7 +817,7 @@ public class SerpApiClient {
     }
 
     private boolean apiKeyBlank() {
-        return properties.getApiKey() == null || properties.getApiKey().isBlank();
+        return !keyPool.hasKeys();
     }
 
     private static String stringOrNull(Object o) {

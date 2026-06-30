@@ -78,6 +78,7 @@ app:
     base-url: https://rsapi.goong.io
     timeout-seconds: 5
   serpapi:
+    # Một hoặc nhiều API key ngăn cách bằng dấu phẩy (xoay vòng, tự bỏ qua key hết lượt).
     api-key: ${SERPAPI_API_KEY:}
     base-url: https://serpapi.com
     timeout-seconds: 10
@@ -87,6 +88,8 @@ app:
     # Số request SerpApi đồng thời tối đa (throttle chống 429 khi enrichment fan-out song song).
     # Hạ nếu gói SerpApi giới hạn chặt; nâng nếu gói cho phép nhiều concurrent hơn.
     max-concurrent: 3
+    # Số giờ bỏ qua một key sau khi phát hiện hết lượt (HTTP 401) trước khi thử lại — quota free reset theo tháng.
+    exhausted-cooldown-hours: 6
   posthog:
     api-host: ${POSTHOG_API_HOST:https://us.posthog.com}
     project-id: ${POSTHOG_PROJECT_ID:}

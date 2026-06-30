@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 @Getter
 @Setter
 public class SerpApiProperties {
+    /** Một hoặc nhiều API key, ngăn cách bằng dấu phẩy (cơ chế xoay vòng). VD: key1,key2,key3 */
     private String apiKey;
     private String baseUrl = "https://serpapi.com";
     private int timeoutSeconds = 10;
@@ -21,4 +22,6 @@ public class SerpApiProperties {
     private int retryBackoffMinutes = 60;
     /** Số request SerpApi đồng thời tối đa (throttle chống 429 khi enrichment fan-out song song) */
     private int maxConcurrent = 3;
+    /** Số giờ bỏ qua một key sau khi phát hiện hết lượt (HTTP 401), trước khi thử lại — quota free reset theo tháng */
+    private int exhaustedCooldownHours = 6;
 }
