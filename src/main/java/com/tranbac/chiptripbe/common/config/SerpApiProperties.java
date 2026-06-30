@@ -20,7 +20,9 @@ public class SerpApiProperties {
     private int cacheTtlDays = 7;
     /** Số phút backoff giữa các lần retry SerpApi khi row chưa enrich đủ — chống thundering herd khi SerpApi down */
     private int retryBackoffMinutes = 60;
-    /** Số request SerpApi đồng thời tối đa (throttle chống 429 khi enrichment fan-out song song) */
+    /** Rate limit thật (req/giây) cho SerpApi — gate chính chống 429 khi enrichment fan-out song song */
+    private double requestsPerSecond = 3.0;
+    /** Burst capacity của token bucket (số token tích tối đa). Giữ tên cũ; KHÔNG còn là giới hạn concurrency */
     private int maxConcurrent = 3;
     /** Số giờ bỏ qua một key sau khi phát hiện hết lượt (HTTP 401), trước khi thử lại — quota free reset theo tháng */
     private int exhaustedCooldownHours = 6;

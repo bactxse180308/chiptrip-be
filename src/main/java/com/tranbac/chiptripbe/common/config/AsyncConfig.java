@@ -15,8 +15,10 @@ public class AsyncConfig {
     @Bean("enrichmentExecutor")
     public Executor enrichmentExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(10);
-        executor.setMaxPoolSize(20);
+        // Sized theo rate gate của SerpApi (app.serpapi.requests-per-second): fan-out rộng hơn chỉ
+        // khiến các thread thừa dồn vào token bucket rồi tự drop sau timeout → mất enrichment vô ích.
+        executor.setCorePoolSize(3);
+        executor.setMaxPoolSize(3);
         executor.setQueueCapacity(50);
         executor.setThreadNamePrefix("enrich-");
         executor.setWaitForTasksToCompleteOnShutdown(true);

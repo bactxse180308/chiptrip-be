@@ -20,8 +20,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
@@ -45,8 +43,8 @@ public class SerpApiClient {
 
     private WebClient client;
 
-    /** Throttle: giới hạn số request SerpApi đồng thời, chống 429 khi enrichment fan-out song song. */
-    private Semaphore rateLimiter;
+    /** Pace-limiter: giới hạn RATE request SerpApi (req/giây) — không chỉ concurrency — chống 429 khi enrichment fan-out song song. */
+    private TokenBucket bucket;
 
     @PostConstruct
     void init() {
@@ -58,7 +56,8 @@ public class SerpApiClient {
                 .baseUrl(properties.getBaseUrl())
                 .exchangeStrategies(strategies)
                 .build();
-        rateLimiter = new Semaphore(Math.max(1, properties.getMaxConcurrent()));
+        // rate = token nạp mỗi giây (gate chống 429); capacity = max burst (giữ semantics maxConcurrent cũ)
+        bucket = new TokenBucket(properties.getRequestsPerSecond(), Math.max(1, properties.getMaxConcurrent()));
     }
 
     /**
@@ -74,8 +73,8 @@ public class SerpApiClient {
      * gặp 401 (key sai/hết lượt) hoặc body báo "out of searches" → đánh dấu key đó exhausted
      * rồi thử key kế tiếp. Hết key khả dụng → trả null (caller fail-soft về Goong).
      *
-     * throttle=true: chờ slot Semaphore tối đa ≈ nửa HTTP timeout, hết slot → null.
-     * Lỗi HTTP khác 401 (429/5xx/timeout) để nguyên cho caller bắt; permit luôn release ở finally.
+     * throttle=true: chờ token bucket tối đa ≈ nửa HTTP timeout, hết token → null.
+     * Lỗi HTTP khác 401 (429/5xx/timeout) để nguyên cho caller bắt (fail-soft về Goong).
      */
     private Map<String, Object> executeSearch(Consumer<UriBuilder> params, boolean throttle) {
         List<String> keys = keyPool.availableKeys();
@@ -83,18 +82,14 @@ public class SerpApiClient {
             log.warn("SerpApi: không còn key khả dụng (chưa cấu hình hoặc tất cả đang cooldown) — bỏ qua request");
             return null;
         }
-        boolean acquired = false;
-        // Chờ slot ngắn (≈ nửa HTTP timeout): khi hàng đợi đầy thì fail nhanh về Goong fallback
-        // thay vì mỗi thread đốt trọn timeoutSeconds chỉ để chờ slot rồi vượt deadline enrichment.
+        // Chờ token ngắn (≈ nửa HTTP timeout): khi rate bão hoà thì fail nhanh về Goong fallback
+        // thay vì mỗi thread đốt trọn timeoutSeconds chỉ để chờ token rồi vượt deadline enrichment.
         long acquireWaitSeconds = Math.max(1, properties.getTimeoutSeconds() / 2);
         try {
-            if (throttle) {
-                acquired = rateLimiter.tryAcquire(acquireWaitSeconds, TimeUnit.SECONDS);
-                if (!acquired) {
-                    log.warn("SerpApi throttle: hết slot ({} đồng thời) sau {}s — bỏ qua request",
-                            properties.getMaxConcurrent(), acquireWaitSeconds);
-                    return null;
-                }
+            if (throttle && !bucket.tryAcquire(acquireWaitSeconds * 1000L)) {
+                log.warn("SerpApi throttle: hết token rate ({}/s) sau {}s — bỏ qua request",
+                        properties.getRequestsPerSecond(), acquireWaitSeconds);
+                return null;
             }
             for (String key : keys) {
                 try {
@@ -128,8 +123,51 @@ public class SerpApiClient {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             return null;
-        } finally {
-            if (acquired) rateLimiter.release();
+        }
+    }
+
+    /**
+     * Token bucket pace-limiter: giới hạn RATE thật (req/giây) chứ không chỉ concurrency —
+     * 3 call concurrency vẫn có thể burst vượt trần per-second của SerpApi → 429.
+     * Nạp {@code refillPerMs} token mỗi ms, tối đa {@code capacity} token (burst).
+     * tryAcquire chờ tối đa maxWaitMillis rồi bỏ cuộc (caller fail-soft về Goong).
+     * Dùng {@code wait(timeout)} tự thức theo thời gian — token nạp theo đồng hồ nên không cần notify.
+     */
+    private static final class TokenBucket {
+        private final double capacity;
+        private final double refillPerMs;
+        private double tokens;
+        private long lastNanos;
+
+        TokenBucket(double ratePerSecond, double capacity) {
+            this.capacity = capacity;
+            this.refillPerMs = ratePerSecond / 1000.0;
+            this.tokens = capacity;
+            this.lastNanos = System.nanoTime();
+        }
+
+        synchronized boolean tryAcquire(long maxWaitMillis) throws InterruptedException {
+            long deadlineNanos = System.nanoTime() + maxWaitMillis * 1_000_000L;
+            while (true) {
+                refill();
+                if (tokens >= 1.0) {
+                    tokens -= 1.0;
+                    return true;
+                }
+                long remainMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+                if (remainMs <= 0) return false;
+                long needMs = (long) Math.ceil((1.0 - tokens) / refillPerMs);
+                wait(Math.min(remainMs, Math.max(1, needMs)));
+            }
+        }
+
+        private void refill() {
+            long now = System.nanoTime();
+            double elapsedMs = (now - lastNanos) / 1_000_000.0;
+            if (elapsedMs > 0) {
+                tokens = Math.min(capacity, tokens + elapsedMs * refillPerMs);
+                lastNanos = now;
+            }
         }
     }
 

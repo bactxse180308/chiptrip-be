@@ -85,8 +85,10 @@ app:
     enabled: true
     cache-ttl-days: 30
     retry-backoff-minutes: 360
-    # Số request SerpApi đồng thời tối đa (throttle chống 429 khi enrichment fan-out song song).
-    # Hạ nếu gói SerpApi giới hạn chặt; nâng nếu gói cho phép nhiều concurrent hơn.
+    # Rate limit thật (req/giây) — gate CHÍNH chống 429. Đây là sàn an toàn; nếu log báo nhiều
+    # "throttle: hết token" / place Goong-only (do trip lớn vượt deadline) thì NÂNG dần khi gói cho phép.
+    requests-per-second: 3
+    # Burst capacity của token bucket (số token tích tối đa). KHÔNG còn là giới hạn concurrency.
     max-concurrent: 3
     # Số giờ bỏ qua một key sau khi phát hiện hết lượt (HTTP 401) trước khi thử lại — quota free reset theo tháng.
     exhausted-cooldown-hours: 6
