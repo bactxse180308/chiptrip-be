@@ -45,7 +45,10 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "longitude", precision = 9, scale = 6)
     private BigDecimal longitude;
 
-    @Column(name = "goong_place_id", length = 255)
+    // Goong place_id thực tế dài tới ~270 ký tự → 255 không đủ. Cột non-unique (chỉ dùng dedup).
+    // LƯU Ý: ddl-auto:update KHÔNG nới cột đã tồn tại — DB cũ phải chạy migration
+    // docs/migrations/2026-06-30-widen-goong-place-id.sql để ALTER lên VARCHAR(512).
+    @Column(name = "goong_place_id", length = 512)
     private String goongPlaceId;
 
     /** Tên tỉnh/thành từ Goong V2 compound.province (vd "Đà Nẵng", "Hà Nội"). */

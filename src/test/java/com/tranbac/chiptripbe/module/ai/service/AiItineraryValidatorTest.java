@@ -69,6 +69,21 @@ class AiItineraryValidatorTest {
     }
 
     @Test
+    void validate_missingSearchQuery_noException() {
+        // searchQuery thiếu (vd "Ăn sáng tại khách sạn") KHÔNG còn fail itinerary —
+        // activity chỉ bị bỏ qua geocode (resolvePlaces tự skip), tránh bão retry gọi AI.
+        GenerateTripRequest req = request(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 1), 5_000_000L);
+        AiItineraryResult result = itinerary(
+                day(1, "2026-07-01", List.of(
+                        activity("08:00", "Ăn sáng tại khách sạn", "FOOD", null, 0L),
+                        activity("10:00", "Hồ Gươm", "ATTRACTION", "Hồ Hoàn Kiếm Hà Nội", 0L),
+                        activity("12:00", "Bún chả", "FOOD", "Bún chả Đắc Kim Hà Nội", 80_000L)))
+        );
+
+        assertDoesNotThrow(() -> validator.validate(result, req));
+    }
+
+    @Test
     void validate_overBudget_throwsAppException() {
         // Budget 1M, tolerance là max(10% × 1M, 1M floor) = 1M → maxAllowed = 2M
         // Tổng cost 3M → vượt

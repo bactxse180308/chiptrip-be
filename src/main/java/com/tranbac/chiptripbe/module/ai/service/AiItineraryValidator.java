@@ -170,13 +170,13 @@ public class AiItineraryValidator {
                 totalCost += activity.getCostVnd();
 
                 ActivityType type = ActivityType.valueOf(normalizedType);
+                // searchQuery THIẾU không còn fail cả itinerary — activity chỉ bị bỏ qua geocode
+                // (vd "Ăn sáng tại khách sạn" vốn không có địa điểm cụ thể; resolvePlaces tự skip
+                // khi searchQuery null/blank). Tránh bão retry gọi AI nhiều lần làm timeout request.
+                // Vẫn chặn query GENERIC khi CÓ — dấu hiệu AI lười sinh tên thật.
                 if (needsSearchQuery(type)) {
                     String q = activity.getSearchQuery();
-                    if (q == null || q.isBlank()) {
-                        throw badAi(String.format(
-                                "Activity '%s' (type=%s) thiếu searchQuery", activity.getName(), type));
-                    }
-                    if (isGenericQuery(q)) {
+                    if (q != null && !q.isBlank() && isGenericQuery(q)) {
                         throw badAi(String.format(
                                 "Activity '%s' (type=%s) có searchQuery generic: '%s'",
                                 activity.getName(), type, q));
@@ -200,7 +200,11 @@ public class AiItineraryValidator {
         }
     }
 
-    /** FOOD, ATTRACTION, ACCOMMODATION, TRANSPORT đều cần searchQuery để geocode. OTHER bỏ qua. */
+    /**
+     * Các type được geocode (FOOD/ATTRACTION/ACCOMMODATION/TRANSPORT) — chỉ dùng để giới hạn
+     * phạm vi check searchQuery generic. searchQuery KHÔNG còn bắt buộc: thiếu thì bỏ qua geocode.
+     * OTHER không geocode.
+     */
     private boolean needsSearchQuery(ActivityType type) {
         return type == ActivityType.FOOD
                 || type == ActivityType.ATTRACTION

@@ -50,12 +50,16 @@ class AiGenerateServiceImpl implements AiService {
     @Override
     public AiCallResult generateItinerary(GenerateTripRequest request, String userPreferences) {
         Map<String, Object> requestBody = buildRequest(request, userPreferences);
-        // Đủ lượt để xoay qua mọi key (khi quota) cộng thêm ngân sách retry cho lỗi tạm thời.
-        int maxAttempts = aiKeyPool.size() + aiProperties.getMaxRetries();
+        // Hai ngân sách ĐỘC LẬP, không cộng gộp:
+        // - keyRotationsLeft: xoay sang key khác khi key bị từ chối (429/401/403) — KHÔNG tốn lượt retry nội dung.
+        // - contentRetriesLeft: retry khi AI trả output lỗi/timeout/JSON sai/validate fail.
+        // Trước đây maxAttempts = keyPool.size() + maxRetries → một itinerary invalid bị gọi lại AI
+        // tới (số key) lần, đẩy request lên ~165s và vượt timeout 60s phía client.
+        int keyRotationsLeft = aiKeyPool.size();
+        int contentRetriesLeft = aiProperties.getMaxRetries();
 
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+        while (true) {
             String apiKey = aiKeyPool.current();
-            boolean lastAttempt = attempt == maxAttempts - 1;
             try {
                 Map<String, Object> response = callLlm(requestBody, apiKey);
                 String content = extractContent(response);
@@ -76,24 +80,22 @@ class AiGenerateServiceImpl implements AiService {
 
             } catch (AiKeyExhaustedException e) {
                 aiKeyPool.rotate(apiKey);
-                if (lastAttempt) {
+                if (keyRotationsLeft-- <= 0) {
                     log.error("AI generation failed: mọi key đều bị từ chối/hết hạn mức");
                     throw AppException.internal("Hệ thống AI tạm hết lượt. Vui lòng thử lại sau.");
                 }
                 log.warn("Key AI bị từ chối (quota/invalid), đổi key và thử lại: {}", e.getMessage());
-                // đổi key → thử lại ngay, không backoff
+                // đổi key → thử lại ngay, không backoff, KHÔNG tốn lượt retry nội dung
 
             } catch (AiRetryableException | WebClientException e) {
-                if (lastAttempt) {
-                    log.error("AI generation failed after {} attempts", attempt + 1, e);
+                if (contentRetriesLeft-- <= 0) {
+                    log.error("AI generation failed sau khi hết lượt retry nội dung", e);
                     throw AppException.internal("AI không thể tạo lịch trình lúc này. Vui lòng thử lại sau.");
                 }
-                log.warn("AI attempt {}/{} failed, retrying: {}", attempt + 1, maxAttempts, e.getMessage());
-                sleepBackoff(Math.min(attempt, aiProperties.getMaxRetries()));
+                log.warn("AI output lỗi, retry (còn {} lượt): {}", contentRetriesLeft, e.getMessage());
+                sleepBackoff(aiProperties.getMaxRetries() - contentRetriesLeft - 1);
             }
         }
-
-        throw AppException.internal("AI generation failed");
     }
 
     /** Exponential backoff giữa các lần retry: 500ms, 1s, 2s, ... */
