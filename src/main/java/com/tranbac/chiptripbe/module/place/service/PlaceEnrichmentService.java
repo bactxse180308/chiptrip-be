@@ -17,6 +17,16 @@ public interface PlaceEnrichmentService {
     record GeoAnchor(BigDecimal lat, BigDecimal lng, String provinceName) {}
 
     /**
+     * Mức độ enrich một địa điểm:
+     * - BASIC: chỉ lấy toạ độ + định danh (vừa đủ để hiển thị lịch trình + pin bản đồ),
+     *   BỎ QUA fetch ảnh gallery + reviews (2 call SerpApi nặng nhất). Để serpEnriched=false
+     *   và serpSyncedAt=null → lần resolve sau (background) coi là cache-miss và tự nâng lên FULL.
+     * - FULL: đầy đủ ảnh + reviews + rating (Google card hoàn chỉnh).
+     * Dùng cho chiến lược: ngày 1 FULL đồng bộ, ngày 2..N BASIC rồi enrich FULL ngầm.
+     */
+    enum EnrichmentDepth { BASIC, FULL }
+
+    /**
      * Geocode 1 địa danh (destination/departure) thành anchor GPS. Cache in-memory theo tên.
      * Trả Optional.empty() nếu Goong fail hoặc kết quả không khớp tên (fail-soft —
      * caller truyền anchors rỗng thì validation degrade về so chuỗi địa chỉ như cũ).
@@ -47,9 +57,32 @@ public interface PlaceEnrichmentService {
      * các tên không có trong gazetteer về cùng 1 toạ độ vùng), chỉ rơi về Goong khi SerpApi miss.
      * Với địa danh/giao thông (Goong tốt hơn) đặt false → giữ Goong-first như cũ.
      */
+    default Optional<PlaceCache> resolvePlace(String placeName, String destination,
+                                              List<GeoAnchor> anchors, Instant deadline,
+                                              boolean preferSerpIdentity) {
+        return resolvePlace(placeName, destination, anchors, deadline, preferSerpIdentity, EnrichmentDepth.FULL);
+    }
+
+    /**
+     * Như trên nhưng có thêm depth (BASIC/FULL). Xem {@link EnrichmentDepth}.
+     * BASIC chỉ resolve toạ độ + định danh, không fetch ảnh/reviews — dùng cho ngày 2..N
+     * khi tạo trip để trả response nhanh, rồi background enrich FULL sau.
+     */
+    default Optional<PlaceCache> resolvePlace(String placeName, String destination,
+                                              List<GeoAnchor> anchors, Instant deadline,
+                                              boolean preferSerpIdentity, EnrichmentDepth depth) {
+        return resolvePlace(placeName, destination, anchors, deadline, preferSerpIdentity, depth, false);
+    }
+
+    /**
+     * forceRefresh=true: BỎ QUA cache-hit (findFreshCache) và enrich lại bất kể backoff.
+     * Dùng cho retry-pass enrich nền sau khi 429 khiến row chưa đủ — lúc đó row có
+     * serpEnriched=false nhưng serpSyncedAt vẫn trong cửa sổ backoff, nên resolvePlace thường
+     * sẽ trả lại chính row chưa đủ thay vì gọi SerpApi lại. forceRefresh ép gọi lại.
+     */
     Optional<PlaceCache> resolvePlace(String placeName, String destination,
                                       List<GeoAnchor> anchors, Instant deadline,
-                                      boolean preferSerpIdentity);
+                                      boolean preferSerpIdentity, EnrichmentDepth depth, boolean forceRefresh);
 
     /**
      * Enrich thêm thông tin khách sạn (bookingUrl + pricePerNightVnd) từ SerpApi Google Hotels,

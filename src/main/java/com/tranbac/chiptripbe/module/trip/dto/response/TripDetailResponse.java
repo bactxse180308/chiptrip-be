@@ -35,6 +35,12 @@ public class TripDetailResponse {
     /** UPCOMING / ONGOING / COMPLETED — derived từ dateStart/dateEnd. */
     private String status;
 
+    /**
+     * true khi còn địa điểm (ngày 2..N) đang được enrich FULL ở luồng nền — FE dùng để poll
+     * lại GET /trips/{id} cho tới khi ảnh/review nảy ra đủ. Tự về false khi enrich nền xong/thất bại.
+     */
+    private boolean enriching;
+
     /** Snapshot lúc tạo: trip tạo bởi tài khoản Premium → quyết định Export PDF & gate FE. */
     private boolean createdAsPremium;
 

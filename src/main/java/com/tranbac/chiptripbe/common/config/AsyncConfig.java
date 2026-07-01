@@ -47,4 +47,24 @@ public class AsyncConfig {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * Pool cho enrich FULL chạy NGẦM sau khi trip đã trả response (ngày 2..N).
+     * 1 thread cố ý: background phải "nhường" foreground generate ở token-bucket SerpApi chung —
+     * nhiều thread nền sẽ tranh quota làm chậm trip đang tạo của user khác. Best-effort:
+     * - DiscardPolicy: queue đầy → bỏ task (địa điểm giữ mức BASIC, vẫn dùng được, không vỡ luồng).
+     * - KHÔNG chờ khi shutdown: enrich nền dở dang chấp nhận mất khi restart (đã có toạ độ + tên persist).
+     */
+    @Bean("backgroundEnrichmentExecutor")
+    public Executor backgroundEnrichmentExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(1);
+        executor.setMaxPoolSize(1);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("bg-enrich-");
+        executor.setWaitForTasksToCompleteOnShutdown(false);
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardPolicy());
+        executor.initialize();
+        return executor;
+    }
 }

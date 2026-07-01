@@ -96,18 +96,23 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public Optional<PlaceCache> resolvePlace(String placeName, String destination,
                                              List<GeoAnchor> anchors, Instant deadline,
-                                             boolean preferSerpIdentity) {
+                                             boolean preferSerpIdentity, EnrichmentDepth depth, boolean forceRefresh) {
         if (placeName == null || placeName.isBlank()) return Optional.empty();
 
         String cleanedName = cleanPlaceName(placeName);
         String normalized = normalize(cleanedName);
         String normalizedDestination = normalize(destination);
 
-        // 1. Cache theo cặp (normalizedName, normalizedDestination)
-        Optional<PlaceCache> fresh = placeCacheService.findFreshCache(normalized, normalizedDestination);
-        if (fresh.isPresent()) {
-            log.debug("Place cache hit: name='{}', dest='{}'", normalized, normalizedDestination);
-            return fresh;
+        // 1. Cache theo cặp (normalizedName, normalizedDestination).
+        // Lưu ý: row BASIC (serpEnriched=false, serpSyncedAt=null) KHÔNG được isFresh() coi là hit
+        // → lần resolve FULL nền sau sẽ tự re-resolve và nâng lên FULL (xem PlaceCacheServiceImpl.isFresh).
+        // forceRefresh (retry-pass sau 429): bỏ qua cache-hit để ép gọi lại bất kể backoff.
+        if (!forceRefresh) {
+            Optional<PlaceCache> fresh = placeCacheService.findFreshCache(normalized, normalizedDestination);
+            if (fresh.isPresent()) {
+                log.debug("Place cache hit: name='{}', dest='{}'", normalized, normalizedDestination);
+                return fresh;
+            }
         }
 
         if (pastDeadline(deadline)) return Optional.empty();
@@ -117,7 +122,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         // tránh việc Goong gom nhiều tên khác nhau về cùng 1 toạ độ vùng → trùng địa điểm.
         if (preferSerpIdentity) {
             Optional<PlaceCache> viaSerp = resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination,
-                    destination, anchors, deadline);
+                    destination, anchors, deadline, depth);
             if (viaSerp.isPresent()) return viaSerp;
             if (pastDeadline(deadline)) return Optional.empty();
             log.debug("SerpApi-first miss cho '{}' — rơi về Goong", cleanedName);
@@ -129,7 +134,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         if (geoOpt.isEmpty()) {
             log.debug("Goong geocode: không tìm thấy '{}', thử SerpApi fallback", geocodeQuery);
             return resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination, destination,
-                    anchors, deadline);
+                    anchors, deadline, depth);
         }
 
         GoongClient.GeocodeResult geo = geoOpt.get();
@@ -141,7 +146,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             log.warn("Goong mismatch: query='{}', address='{}', expectedDestination='{}' — thử SerpApi fallback",
                     geocodeQuery, geo.formattedAddress(), destination);
             return resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination, destination,
-                    anchors, deadline);
+                    anchors, deadline, depth);
         }
 
         // 3. Dedup theo goongPlaceId (an toàn với duplicate trong DB).
@@ -185,18 +190,25 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         toSave.setLastSyncedAt(LocalDateTime.now());
 
         // 5. SerpApi enrich (best-effort: nếu fail vẫn lưu data Goong).
-        // Nếu đã thử SerpApi-first ở trên mà miss (preferSerpIdentity=true rồi rơi xuống Goong) thì
-        // KHÔNG search lại cùng query — tránh gọi SerpApi 2 lần (đốt quota, đẩy 429) cho 1 activity.
-        SerpEnrichOutcome outcome = preferSerpIdentity
-                ? new SerpEnrichOutcome(false, LocalDateTime.now())
-                : enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination,
-                        geo, anchors, deadline, placeName);
-        toSave.setSerpEnriched(outcome.enriched());
-        toSave.setSerpSyncedAt(outcome.syncedAt());
+        // BASIC: KHÔNG fetch ảnh/reviews — chỉ giữ toạ độ Goong. Để serpEnriched=false +
+        // serpSyncedAt=null → isFresh() coi là miss → lần enrich nền (FULL) sẽ nâng cấp row này.
+        if (depth == EnrichmentDepth.BASIC) {
+            toSave.setSerpEnriched(false);
+            toSave.setSerpSyncedAt(null);
+        } else {
+            // Nếu đã thử SerpApi-first ở trên mà miss (preferSerpIdentity=true rồi rơi xuống Goong) thì
+            // KHÔNG search lại cùng query — tránh gọi SerpApi 2 lần (đốt quota, đẩy 429) cho 1 activity.
+            SerpEnrichOutcome outcome = preferSerpIdentity
+                    ? new SerpEnrichOutcome(false, LocalDateTime.now())
+                    : enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination,
+                            geo, anchors, deadline, placeName);
+            toSave.setSerpEnriched(outcome.enriched());
+            toSave.setSerpSyncedAt(outcome.syncedAt());
+        }
         try {
             PlaceCache saved = placeCacheService.save(toSave);
-            log.debug("Saved place cache id={} normalized='{}' dest='{}' serpEnriched={}",
-                    saved.getId(), normalized, normalizedDestination, outcome.enriched());
+            log.debug("Saved place cache id={} normalized='{}' dest='{}' depth={} serpEnriched={}",
+                    saved.getId(), normalized, normalizedDestination, depth, saved.isSerpEnriched());
             return Optional.of(saved);
         } catch (DataIntegrityViolationException ex) {
             String placeId = toSave.getGoongPlaceId();
@@ -635,7 +647,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
      */
     private Optional<PlaceCache> resolvePlaceViaSerpApi(
             String cleanedName, String normalized, String normalizedDestination, String destination,
-            List<GeoAnchor> anchors, Instant deadline) {
+            List<GeoAnchor> anchors, Instant deadline, EnrichmentDepth depth) {
 
         if (pastDeadline(deadline)) return Optional.empty();
 
@@ -692,36 +704,48 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         toSave.setPhone(best.phone());
         toSave.setWebsite(best.website());
 
-        String dataId = best.dataId() != null ? best.dataId() : best.placeId();
-        if (dataId != null && !dataId.isBlank() && !pastDeadline(deadline)) {
-            List<Map<String, String>> photos = safeFetchPhotos(dataId);
-            if (!photos.isEmpty()) {
-                try { toSave.setPhotosJson(objectMapper.writeValueAsString(photos)); }
-                catch (Exception ex) { log.warn("SerpApi fallback: serialize photos failed: {}", ex.getMessage()); }
-            }
+        if (depth == EnrichmentDepth.BASIC) {
+            // BASIC: chỉ giữ thumbnail (1 ảnh) cho card hiển thị ngay, KHÔNG fetch gallery/reviews.
+            // serpEnriched=false + serpSyncedAt=null → enrich nền (FULL) sẽ nâng cấp row này.
             if (toSave.getPhotosJson() == null && best.thumbnailUrl() != null) {
                 toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
             }
+            toSave.setSerpEnriched(false);
+            toSave.setSerpSyncedAt(null);
+            log.info("SerpApi BASIC resolved: name='{}' lat={} lng={} rating={} (ảnh/review để enrich nền)",
+                    cleanedName, best.latitude(), best.longitude(), best.rating());
+        } else {
+            String dataId = best.dataId() != null ? best.dataId() : best.placeId();
+            if (dataId != null && !dataId.isBlank() && !pastDeadline(deadline)) {
+                List<Map<String, String>> photos = safeFetchPhotos(dataId);
+                if (!photos.isEmpty()) {
+                    try { toSave.setPhotosJson(objectMapper.writeValueAsString(photos)); }
+                    catch (Exception ex) { log.warn("SerpApi fallback: serialize photos failed: {}", ex.getMessage()); }
+                }
+                if (toSave.getPhotosJson() == null && best.thumbnailUrl() != null) {
+                    toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
+                }
 
-            List<Map<String, Object>> reviews = pastDeadline(deadline) ? List.of() : safeFetchReviews(dataId);
-            if (!reviews.isEmpty()) {
-                try { toSave.setReviewsJson(objectMapper.writeValueAsString(reviews)); }
-                catch (Exception ex) { log.warn("SerpApi fallback: serialize reviews failed: {}", ex.getMessage()); }
+                List<Map<String, Object>> reviews = pastDeadline(deadline) ? List.of() : safeFetchReviews(dataId);
+                if (!reviews.isEmpty()) {
+                    try { toSave.setReviewsJson(objectMapper.writeValueAsString(reviews)); }
+                    catch (Exception ex) { log.warn("SerpApi fallback: serialize reviews failed: {}", ex.getMessage()); }
+                }
+            } else if (best.thumbnailUrl() != null) {
+                toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
             }
-        } else if (best.thumbnailUrl() != null) {
-            toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
+
+            boolean hasBasic = best.rating() != null || best.reviewCount() != null
+                    || best.phone() != null || best.website() != null;
+            boolean hasPhotos = toSave.getPhotosJson() != null;
+            boolean hasOpeningHours = best.operatingHoursJson() != null || best.hours() != null || best.openState() != null;
+            boolean hasReviews = toSave.getReviewsJson() != null;
+            toSave.setSerpEnriched(hasBasic && hasPhotos && (hasOpeningHours || hasReviews));
+            toSave.setSerpSyncedAt(LocalDateTime.now());
+
+            log.info("SerpApi fallback resolved (Goong miss): name='{}' lat={} lng={} rating={} serpEnriched={}",
+                    cleanedName, best.latitude(), best.longitude(), best.rating(), toSave.isSerpEnriched());
         }
-
-        boolean hasBasic = best.rating() != null || best.reviewCount() != null
-                || best.phone() != null || best.website() != null;
-        boolean hasPhotos = toSave.getPhotosJson() != null;
-        boolean hasOpeningHours = best.operatingHoursJson() != null || best.hours() != null || best.openState() != null;
-        boolean hasReviews = toSave.getReviewsJson() != null;
-        toSave.setSerpEnriched(hasBasic && hasPhotos && (hasOpeningHours || hasReviews));
-        toSave.setSerpSyncedAt(LocalDateTime.now());
-
-        log.info("SerpApi fallback resolved (Goong miss): name='{}' lat={} lng={} rating={} serpEnriched={}",
-                cleanedName, best.latitude(), best.longitude(), best.rating(), toSave.isSerpEnriched());
 
         try {
             return Optional.of(placeCacheService.save(toSave));

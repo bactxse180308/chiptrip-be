@@ -216,7 +216,12 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
             String formattedAddress = p != null ? p.getAddress() : null;
             String geocodingProvider = p != null ? (p.getGoongPlaceId() != null ? "goong" : "serpapi") : null;
             Long placeCacheId = p != null ? p.getId() : null;
-            String activityImageUrl = p != null ? extractFirstPhotoUrl(p.getPhotosJson()) : null;
+            // Chỉ "đóng băng" imageUrl vào Activity khi place đã FULL (serpEnriched). Với place BASIC
+            // (ngày 2..N), để null → TripServiceImpl.toTripDetailActivityDetail tự fallback đọc
+            // PlaceCache.photosJson LIVE, nên ảnh tự nảy ra khi enrich nền hoàn tất (không cần update Activity).
+            String activityImageUrl = (p != null && p.isSerpEnriched())
+                    ? extractFirstPhotoUrl(p.getPhotosJson())
+                    : null;
             // Luôn ưu tiên dùng link từ SerpApi (đã chứa tham số ngày, số người) thay vì link generic của AI cho khách sạn
             String activityBookingUrl = p != null && p.getBookingUrl() != null && !p.getBookingUrl().isBlank() 
                                         ? p.getBookingUrl() 
