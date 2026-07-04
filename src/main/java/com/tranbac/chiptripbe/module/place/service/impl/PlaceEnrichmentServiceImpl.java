@@ -3,6 +3,7 @@ package com.tranbac.chiptripbe.module.place.service.impl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.util.PlaceQueryUtil;
 import com.tranbac.chiptripbe.module.geocoding.client.GoongClient;
+import com.tranbac.chiptripbe.module.geocoding.client.MapsScraperClient;
 import com.tranbac.chiptripbe.module.geocoding.client.SerpApiClient;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
@@ -38,6 +39,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     private final PlaceCacheRepository placeCacheRepository;
     private final GoongClient goongClient;
     private final SerpApiClient serpApiClient;
+    private final MapsScraperClient mapsScraperClient;
     private final ObjectMapper objectMapper;
 
     /** Cache anchor theo normalize(tên) — destination lặp lại nhiều giữa các trip. Chỉ cache hit. */
@@ -197,9 +199,11 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             toSave.setSerpSyncedAt(null);
         } else {
             // Nếu đã thử SerpApi-first ở trên mà miss (preferSerpIdentity=true rồi rơi xuống Goong) thì
-            // KHÔNG search lại cùng query — tránh gọi SerpApi 2 lần (đốt quota, đẩy 429) cho 1 activity.
+            // KHÔNG search lại SerpApi (tránh gọi 2 lần), NHƯNG thử scraper — nguồn khác chưa dùng cho
+            // activity này → FOOD/ATTRACTION vẫn được enrich rating/review/ảnh khi SerpApi hết quota.
+            // Scraper tắt → enrichWithScraper trả empty ngay = giữ nguyên hành vi cũ.
             SerpEnrichOutcome outcome = preferSerpIdentity
-                    ? new SerpEnrichOutcome(false, LocalDateTime.now())
+                    ? enrichWithScraper(toSave, cleanedName, deadline)
                     : enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination,
                             geo, anchors, deadline, placeName);
             toSave.setSerpEnriched(outcome.enriched());
@@ -339,15 +343,15 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             String serpQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
             List<SerpApiClient.PlaceData> candidates = serpApiClient.searchPlaceCandidates(serpQuery);
             if (candidates.isEmpty()) {
-                log.debug("SerpApi không trả về candidate cho '{}', áp dụng backoff", serpQuery);
-                return new SerpEnrichOutcome(false, LocalDateTime.now());
+                log.debug("SerpApi không trả về candidate cho '{}' — thử scraper fallback", serpQuery);
+                return enrichWithScraper(entity, cleanedName, deadline);
             }
 
             SerpApiClient.PlaceData s = pickBestCandidate(candidates, cleanedName, normalizedDestination, geo, anchors);
             if (s == null) {
-                log.warn("SerpApi: không có candidate khớp destination='{}' cho query='{}' ({} candidates) — bỏ qua enrichment",
+                log.warn("SerpApi: không có candidate khớp destination='{}' cho query='{}' ({} candidates) — thử scraper fallback",
                         destination, serpQuery, candidates.size());
-                return new SerpEnrichOutcome(false, LocalDateTime.now());
+                return enrichWithScraper(entity, cleanedName, deadline);
             }
 
             entity.setSerpDataId(s.dataId());
@@ -424,6 +428,51 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             log.warn("SerpApi enrich failed for '{}', dùng Goong-only data: {}", originalName, e.getMessage());
             return new SerpEnrichOutcome(false, null);
         }
+    }
+
+    /**
+     * Fallback enrich qua sidecar scrape Google Maps khi SerpApi miss (hết key / không có candidate).
+     * Chỉ SET các field enrich lên entity (entity đã có toạ độ từ Goong). Best-effort: sidecar tắt /
+     * cooldown / lỗi → không set gì, giữ Goong-only. Không thay được luồng khách sạn (google_hotels).
+     */
+    private SerpEnrichOutcome enrichWithScraper(PlaceCache entity, String cleanedName, Instant deadline) {
+        if (pastDeadline(deadline)) return new SerpEnrichOutcome(false, LocalDateTime.now());
+        String query = PlaceQueryUtil.buildPlaceQuery(cleanedName);
+        Optional<MapsScraperClient.ScrapedPlace> opt = mapsScraperClient.scrape(query, false);
+        if (opt.isEmpty()) return new SerpEnrichOutcome(false, LocalDateTime.now());
+        MapsScraperClient.ScrapedPlace s = opt.get();
+
+        if (s.rating() != null) entity.setRating(s.rating());
+        if (s.reviewCount() != null) entity.setReviewCount(s.reviewCount());
+        if (s.placeType() != null) entity.setPlaceType(truncate(s.placeType(), 100));
+        if (s.phone() != null) entity.setPhone(truncate(s.phone(), 50));
+        // truncate theo độ dài cột: tránh DataIntegrityViolation (handler ở resolvePlace tưởng là dup goong_place_id)
+        if (s.website() != null) entity.setWebsite(truncate(s.website(), 500));
+        if (s.openState() != null) entity.setOpenState(s.openState());
+        if (s.hoursText() != null) entity.setHoursText(truncate(s.hoursText(), 255));
+        if (s.openingHoursJson() != null) entity.setOpeningHoursJson(s.openingHoursJson());
+        if (s.photosJson() != null) entity.setPhotosJson(s.photosJson());
+        if (s.reviewsJson() != null) entity.setReviewsJson(s.reviewsJson());
+        if (s.title() != null && (entity.getSerpTitle() == null || entity.getSerpTitle().isBlank())) {
+            entity.setSerpTitle(s.title());
+        }
+
+        boolean hasBasic = s.rating() != null || s.reviewCount() != null
+                || s.phone() != null || s.website() != null;
+        boolean hasPhotos = s.photosJson() != null;
+        boolean hasOpeningHours = s.openingHoursJson() != null || s.hoursText() != null || s.openState() != null;
+        boolean hasReviews = s.reviewsJson() != null;
+        boolean enriched = hasBasic && hasPhotos && (hasOpeningHours || hasReviews);
+
+        log.info("Scraper enrich: name='{}', rating={}, reviewCount={}, hasPhotos={}, hasReviews={}, degraded={}, enriched={}",
+                cleanedName, s.rating(), s.reviewCount(), hasPhotos, hasReviews, s.degraded(), enriched);
+
+        return new SerpEnrichOutcome(enriched, LocalDateTime.now());
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return null;
+        return s.length() > max ? s.substring(0, max) : s;
     }
 
     /**

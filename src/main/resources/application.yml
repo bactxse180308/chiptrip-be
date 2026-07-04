@@ -92,6 +92,14 @@ app:
     max-concurrent: 3
     # Số giờ bỏ qua một key sau khi phát hiện hết lượt (HTTP 401) trước khi thử lại — quota free reset theo tháng.
     exhausted-cooldown-hours: 6
+  scraper:
+    # Fallback scrape Google Maps khi SerpApi hết quota. Sidecar Python chạy localhost trên VPS.
+    # Bật khi sidecar đã deploy; tắt (false) → hệ thống về đúng hành vi Goong+SerpApi cũ.
+    enabled: ${SCRAPER_ENABLED:false}
+    base-url: ${SCRAPER_URL:http://127.0.0.1:8899}
+    timeout-seconds: 55
+    max-reviews: 3
+    max-photos: 5
   posthog:
     api-host: ${POSTHOG_API_HOST:https://us.posthog.com}
     project-id: ${POSTHOG_PROJECT_ID:}
