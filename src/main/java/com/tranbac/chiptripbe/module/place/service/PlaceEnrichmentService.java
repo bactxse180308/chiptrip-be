@@ -80,9 +80,23 @@ public interface PlaceEnrichmentService {
      * serpEnriched=false nhưng serpSyncedAt vẫn trong cửa sổ backoff, nên resolvePlace thường
      * sẽ trả lại chính row chưa đủ thay vì gọi SerpApi lại. forceRefresh ép gọi lại.
      */
+    default Optional<PlaceCache> resolvePlace(String placeName, String destination,
+                                              List<GeoAnchor> anchors, Instant deadline,
+                                              boolean preferSerpIdentity, EnrichmentDepth depth, boolean forceRefresh) {
+        return resolvePlace(placeName, destination, anchors, deadline, preferSerpIdentity, depth, forceRefresh, true);
+    }
+
+    /**
+     * allowScraper=false: KHÔNG dùng sidecar scrape Google Maps ở lần enrich này (chỉ Goong + SerpApi).
+     * Dùng cho luồng generate ĐỒNG BỘ (ngày 1): scraper chậm (~10-15s/điểm khi VPS tải) dễ vỡ deadline
+     * 55s → foreground bỏ scraper để trả nhanh. Địa điểm chưa enrich đủ (serpEnriched=false) sẽ được
+     * scraper enrich Ở LUỒNG NỀN (allowScraper=true, mặc định của các overload trên). Suggest-alternative
+     * và retry-pass nền giữ allowScraper=true như cũ.
+     */
     Optional<PlaceCache> resolvePlace(String placeName, String destination,
                                       List<GeoAnchor> anchors, Instant deadline,
-                                      boolean preferSerpIdentity, EnrichmentDepth depth, boolean forceRefresh);
+                                      boolean preferSerpIdentity, EnrichmentDepth depth, boolean forceRefresh,
+                                      boolean allowScraper);
 
     /**
      * Enrich thêm thông tin khách sạn (bookingUrl + pricePerNightVnd) từ SerpApi Google Hotels,

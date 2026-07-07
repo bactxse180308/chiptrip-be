@@ -16,7 +16,7 @@ public interface AnalyticsService {
 
     /**
      * Funnel chuyển đổi: số người dùng (distinct) đạt mỗi bước, theo thứ tự cố định
-     * sign_up → generate_started → generate_succeeded → trip_saved → booking_click →
+     * sign_up → generate_started → generate_succeeded → booking_click →
      * publish → purchase_started → purchase_succeeded. N ngày gần nhất.
      */
     List<EventCountResponse> getFunnel(int days);

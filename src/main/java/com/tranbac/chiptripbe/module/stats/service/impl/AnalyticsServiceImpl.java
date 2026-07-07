@@ -31,7 +31,7 @@ class AnalyticsServiceImpl implements AnalyticsService {
     /** Thứ tự bước funnel — phải khớp nhãn ở frontend. */
     private static final List<String> FUNNEL_STEPS = List.of(
             "sign_up", "generate_started", "generate_succeeded",
-            "trip_saved", "booking_click", "publish",
+            "booking_click", "publish",
             "purchase_started", "purchase_succeeded");
 
     private final WebClient.Builder webClientBuilder;

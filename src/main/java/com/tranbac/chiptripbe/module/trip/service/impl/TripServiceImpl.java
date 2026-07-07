@@ -277,8 +277,10 @@ class TripServiceImpl implements TripService {
         Instant deadline = Instant.now().plusSeconds(55);
 
         List<List<GeoActivity>> groupList = List.copyOf(groups.values());
-        // Nhóm chỉ-BASIC ở luồng đồng bộ (ngày 2..N, không phải khách sạn) → enrich FULL ngầm sau.
-        List<BgEnrich> bgList = new ArrayList<>();
+        // BgEnrich cho TỪNG nhóm (song song với groupList/futures) + cờ nhóm nào BASIC —
+        // sau join sẽ chọn nhóm nào cần enrich nền (BASIC ngày 2..N, hoặc FULL mà SerpApi miss).
+        List<BgEnrich> groupBg = new ArrayList<>(groupList.size());
+        List<Boolean> groupIsBasic = new ArrayList<>(groupList.size());
         List<CompletableFuture<PlaceCache>> futures = new ArrayList<>(groupList.size());
         for (List<GeoActivity> group : groupList) {
             AiItineraryResult.AiActivity first = group.get(0).act();
@@ -305,9 +307,8 @@ class TripServiceImpl implements TripService {
                     (minDay >= 2 && !hasAccommodation)
                             ? PlaceEnrichmentService.EnrichmentDepth.BASIC
                             : PlaceEnrichmentService.EnrichmentDepth.FULL;
-            if (depth == PlaceEnrichmentService.EnrichmentDepth.BASIC) {
-                bgList.add(new BgEnrich(first.getSearchQuery(), destination, List.copyOf(anchors), preferSerp, minDay));
-            }
+            groupBg.add(new BgEnrich(first.getSearchQuery(), destination, List.copyOf(anchors), preferSerp, minDay));
+            groupIsBasic.add(depth == PlaceEnrichmentService.EnrichmentDepth.BASIC);
 
             final boolean fHasAccommodation = hasAccommodation;
             final boolean fPreferSerp = preferSerp;
@@ -316,8 +317,11 @@ class TripServiceImpl implements TripService {
             final List<GeoActivity> fGroup = group;
             futures.add(CompletableFuture.supplyAsync(() -> {
                 try {
+                    // allowScraper=false: foreground KHÔNG chờ scraper (chậm ~10-15s/điểm) — nhóm chưa
+                    // enrich đủ sẽ được scraper enrich ở luồng nền, để generate trả nhanh dưới deadline.
                     Optional<PlaceCache> placeOpt = placeEnrichmentService.resolvePlace(
-                            first.getSearchQuery(), destination, fAnchors, deadline, fPreferSerp, fDepth);
+                            first.getSearchQuery(), destination, fAnchors, deadline, fPreferSerp, fDepth,
+                            false, false);
                     placeOpt.ifPresent(cache -> {
                         if (fHasAccommodation) {
                             // Check-in/out theo đúng dải đêm của khách sạn này (trip có thể
@@ -348,14 +352,23 @@ class TripServiceImpl implements TripService {
                 .join();
 
         // Populate sau join, chỉ từ future đã hoàn tất — task bị orTimeout bỏ rơi không thể
-        // ghi xen vào map trong lúc persist đang đọc; mỗi group nguyên tử (có place cả nhóm)
+        // ghi xen vào map trong lúc persist đang đọc; mỗi group nguyên tử (có place cả nhóm).
+        // Đồng thời gom danh sách enrich nền: (a) nhóm BASIC ngày 2..N (luôn nâng FULL như cũ);
+        // (b) nhóm FULL (ngày 1 / khách sạn) mà SerpApi miss → serpEnriched=false: scraper enrich
+        // ở luồng nền (foreground đã bỏ scraper). Nhóm FULL geocode fail (cache==null) không đưa
+        // vào nền (thường do query xấu, re-resolve không cứu được).
+        List<BgEnrich> bgList = new ArrayList<>();
         for (int i = 0; i < futures.size(); i++) {
             CompletableFuture<PlaceCache> f = futures.get(i);
-            if (!f.isDone() || f.isCompletedExceptionally()) continue;
-            PlaceCache cache = f.getNow(null);
-            if (cache == null) continue;
-            for (GeoActivity ga : groupList.get(i)) {
-                result.put(ga.act(), cache);
+            boolean done = f.isDone() && !f.isCompletedExceptionally();
+            PlaceCache cache = done ? f.getNow(null) : null;
+            if (cache != null) {
+                for (GeoActivity ga : groupList.get(i)) {
+                    result.put(ga.act(), cache);
+                }
+            }
+            if (groupIsBasic.get(i) || (cache != null && !cache.isSerpEnriched())) {
+                bgList.add(groupBg.get(i));
             }
         }
 

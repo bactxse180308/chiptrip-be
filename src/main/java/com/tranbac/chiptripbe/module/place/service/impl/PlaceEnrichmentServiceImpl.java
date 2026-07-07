@@ -98,7 +98,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public Optional<PlaceCache> resolvePlace(String placeName, String destination,
                                              List<GeoAnchor> anchors, Instant deadline,
-                                             boolean preferSerpIdentity, EnrichmentDepth depth, boolean forceRefresh) {
+                                             boolean preferSerpIdentity, EnrichmentDepth depth, boolean forceRefresh,
+                                             boolean allowScraper) {
         if (placeName == null || placeName.isBlank()) return Optional.empty();
 
         String cleanedName = cleanPlaceName(placeName);
@@ -201,11 +202,13 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             // Nếu đã thử SerpApi-first ở trên mà miss (preferSerpIdentity=true rồi rơi xuống Goong) thì
             // KHÔNG search lại SerpApi (tránh gọi 2 lần), NHƯNG thử scraper — nguồn khác chưa dùng cho
             // activity này → FOOD/ATTRACTION vẫn được enrich rating/review/ảnh khi SerpApi hết quota.
-            // Scraper tắt → enrichWithScraper trả empty ngay = giữ nguyên hành vi cũ.
+            // Scraper tắt HOẶC allowScraper=false (foreground ngày 1) → trả empty ngay, để scraper
+            // enrich ở luồng nền. enrichWithSerpApi cũng chỉ rơi về scraper khi allowScraper=true.
             SerpEnrichOutcome outcome = preferSerpIdentity
-                    ? enrichWithScraper(toSave, cleanedName, deadline)
+                    ? (allowScraper ? enrichWithScraper(toSave, cleanedName, deadline)
+                            : new SerpEnrichOutcome(false, null))
                     : enrichWithSerpApi(toSave, cleanedName, destination, normalizedDestination,
-                            geo, anchors, deadline, placeName);
+                            geo, anchors, deadline, placeName, allowScraper);
             toSave.setSerpEnriched(outcome.enriched());
             toSave.setSerpSyncedAt(outcome.syncedAt());
         }
@@ -332,7 +335,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                                                 GoongClient.GeocodeResult geo,
                                                 List<GeoAnchor> anchors,
                                                 Instant deadline,
-                                                String originalName) {
+                                                String originalName,
+                                                boolean allowScraper) {
         try {
             if (pastDeadline(deadline)) {
                 log.debug("SerpApi enrich skip (deadline) cho '{}'", cleanedName);
@@ -343,15 +347,17 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             String serpQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
             List<SerpApiClient.PlaceData> candidates = serpApiClient.searchPlaceCandidates(serpQuery);
             if (candidates.isEmpty()) {
-                log.debug("SerpApi không trả về candidate cho '{}' — thử scraper fallback", serpQuery);
-                return enrichWithScraper(entity, cleanedName, deadline);
+                log.debug("SerpApi không trả về candidate cho '{}' — thử scraper fallback (allowScraper={})", serpQuery, allowScraper);
+                return allowScraper ? enrichWithScraper(entity, cleanedName, deadline)
+                        : new SerpEnrichOutcome(false, null);
             }
 
             SerpApiClient.PlaceData s = pickBestCandidate(candidates, cleanedName, normalizedDestination, geo, anchors);
             if (s == null) {
-                log.warn("SerpApi: không có candidate khớp destination='{}' cho query='{}' ({} candidates) — thử scraper fallback",
-                        destination, serpQuery, candidates.size());
-                return enrichWithScraper(entity, cleanedName, deadline);
+                log.warn("SerpApi: không có candidate khớp destination='{}' cho query='{}' ({} candidates) — thử scraper fallback (allowScraper={})",
+                        destination, serpQuery, candidates.size(), allowScraper);
+                return allowScraper ? enrichWithScraper(entity, cleanedName, deadline)
+                        : new SerpEnrichOutcome(false, null);
             }
 
             entity.setSerpDataId(s.dataId());
