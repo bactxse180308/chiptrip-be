@@ -42,12 +42,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -70,12 +70,14 @@ class TripServiceImpl implements TripService {
     /** Chờ giữa pass1 và retry-pass enrich nền để rate window SerpApi dịu sau 429 (best-effort). */
     private static final long BACKGROUND_RETRY_DELAY_MS = 5_000;
 
-    /**
-     * Cửa sổ coi 1 place chưa-FULL là "đang enrich nền" — tính từ lastSyncedAt (lần cuối đụng row).
-     * Bao trùm cả pass1 + retry-pass nền (vài chục giây) để cờ enriching giữ true xuyên suốt,
-     * đồng thời CÓ TRẦN để cờ không kẹt true vĩnh viễn nếu 1 row không bao giờ được nâng FULL.
-     */
-    private static final Duration ENRICHING_GRACE = Duration.ofMinutes(5);
+    /** Bỏ qua trip mới tạo dưới ngưỡng này khi sweep — job nền in-memory có thể còn đang chạy. */
+    private static final int ENRICH_SWEEP_GRACE_MINUTES = 3;
+
+    /** Trần số lần sweeper thử enrich lại 1 trip trước khi bỏ (địa điểm có thể không bao giờ có data). */
+    private static final int ENRICH_MAX_ATTEMPTS = 3;
+
+    /** Số trip xử lý mỗi lượt sweep — chặn 1 tick ôm quá nhiều việc. */
+    private static final int ENRICH_SWEEP_BATCH = 20;
 
     private final TripRepository tripRepository;
     private final TripDayRepository tripDayRepository;
@@ -122,17 +124,32 @@ class TripServiceImpl implements TripService {
         // Ngày 1 enrich FULL đồng bộ; ngày 2..N chỉ BASIC (toạ độ) để trả response nhanh.
         ResolveOutcome outcome = resolvePlaces(aiCallResult.itinerary(), request);
 
+        // enrichmentPending persist = còn việc enrich nền → FE poll tiếp; nếu job nền dưới đây không
+        // chạy được (queue DiscardPolicy / app restart), cờ giữ true → TripEnrichmentScheduler quét lại.
+        boolean needsBackgroundEnrichment = outcome.backgroundJob() != null;
         TripGenerateResponse response = tripGenerationPersistenceService.persistGeneratedTrip(
-                userId, request, aiCallResult, outcome.resolved());
+                userId, request, aiCallResult, outcome.resolved(), needsBackgroundEnrichment);
 
         // Sau khi trip đã COMMIT: nâng các địa điểm ngày 2..N lên FULL ở luồng nền (best-effort).
         // FE poll GET /trips/{id} sẽ tự thấy ảnh/review nảy ra dần (đọc PlaceCache live).
-        if (outcome.backgroundJob() != null) {
+        if (needsBackgroundEnrichment) {
+            Long tripId = response.getId();
+            Runnable job = outcome.backgroundJob();
+            // Bọc job: chạy xong (pass1 + retry-pass) thì tắt cờ enrichmentPending. Nếu job bị
+            // DiscardPolicy bỏ / app restart trước khi chạy → cờ giữ true → sweeper hoàn tất (durable).
+            Runnable durableJob = () -> {
+                try {
+                    job.run();
+                } finally {
+                    tripRepository.markEnrichmentDone(tripId);
+                }
+            };
             try {
-                backgroundEnrichmentExecutor.execute(outcome.backgroundJob());
+                backgroundEnrichmentExecutor.execute(durableJob);
             } catch (Exception e) {
-                // Executor từ chối (queue đầy) → bỏ qua, địa điểm giữ mức BASIC vẫn dùng được.
-                log.warn("Background enrich không thể submit cho trip id={}: {}", response.getId(), e.getMessage());
+                // Không submit được → giữ cờ pending để sweeper quét lại (không tắt cờ ở đây).
+                log.warn("Background enrich không thể submit cho trip id={}: {} (sweeper sẽ quét lại)",
+                        response.getId(), e.getMessage());
             }
         }
         return response;
@@ -431,6 +448,81 @@ class TripServiceImpl implements TripService {
         }
     }
 
+    /**
+     * Durable safety-net cho enrich nền (P1): job nền ngày 2..N submit vào executor in-memory là
+     * best-effort — mất khi app restart / queue DiscardPolicy / provider down lâu. Method này (gọi
+     * bởi TripEnrichmentScheduler) quét các trip còn enrichmentPending mà job nền lẽ ra đã xong,
+     * reconstruct danh sách địa điểm chưa FULL TỪ DB rồi enrich lại; tắt cờ khi xong hoặc hết số lần thử.
+     *
+     * NOT_SUPPORTED để KHÔNG giữ DB transaction trong lúc gọi Goong/SerpApi (giống generateTrip).
+     */
+    @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public void sweepPendingEnrichments() {
+        LocalDateTime createdBefore = LocalDateTime.now().minusMinutes(ENRICH_SWEEP_GRACE_MINUTES);
+        List<Trip> pending = tripRepository.findPendingEnrichment(
+                createdBefore, ENRICH_MAX_ATTEMPTS, PageRequest.of(0, ENRICH_SWEEP_BATCH));
+        if (pending.isEmpty()) return;
+        log.info("TripEnrichmentSweeper: {} trip còn enrichment pending → enrich lại", pending.size());
+        for (Trip trip : pending) {
+            int remaining;
+            try {
+                remaining = reEnrichTripPlaces(trip);
+            } catch (Exception e) {
+                log.warn("Sweep enrich trip id={} lỗi: {}", trip.getId(), e.getMessage());
+                remaining = Integer.MAX_VALUE;   // coi như còn dở → theo trần attempts để dừng
+            }
+            boolean lastAttempt = trip.getEnrichmentAttempts() + 1 >= ENRICH_MAX_ATTEMPTS;
+            if (remaining == 0 || lastAttempt) {
+                tripRepository.markEnrichmentDone(trip.getId());
+            } else {
+                tripRepository.incrementEnrichmentAttempts(trip.getId());
+            }
+        }
+    }
+
+    /**
+     * Reconstruct từ DB các nhóm địa điểm CHƯA FULL (BASIC/serp-miss) của 1 trip rồi enrich lại FULL.
+     * Trả số nhóm vẫn chưa FULL sau lượt enrich (0 = đã đủ hết). Chỉ enrich địa điểm ĐÃ resolve toạ độ
+     * (có placeCacheId) — activity chưa geocode được (query xấu) re-resolve cũng khó cứu nên bỏ qua.
+     */
+    private int reEnrichTripPlaces(Trip trip) {
+        List<TripDay> days = tripDayRepository.findByTripIdOrderByDayNumber(trip.getId());
+        List<Activity> activities = days.stream()
+                .flatMap(d -> activityRepository.findByDayIdOrderByDisplayOrder(d.getId()).stream())
+                .toList();
+        List<Long> placeCacheIds = activities.stream()
+                .map(Activity::getPlaceCacheId).filter(Objects::nonNull).distinct().toList();
+        if (placeCacheIds.isEmpty()) return 0;
+        Map<Long, PlaceCache> cacheMap = new HashMap<>();
+        placeCacheRepository.findAllById(placeCacheIds).forEach(p -> cacheMap.put(p.getId(), p));
+
+        // Dedup theo canonicalKey (như luồng foreground); preferSerp theo type (FOOD/ATTRACTION ưu tiên
+        // SerpApi). Anchors để rỗng: row đã có trong cache theo canonicalKey → enrich lại đúng row đó.
+        Map<String, BgEnrich> groups = new LinkedHashMap<>();
+        for (Activity act : activities) {
+            ActivityType type = act.getType() != null ? act.getType() : ActivityType.OTHER;
+            if (!shouldGeocode(type)) continue;
+            Long pcId = act.getPlaceCacheId();
+            if (pcId == null) continue;
+            PlaceCache pc = cacheMap.get(pcId);
+            if (pc == null || pc.isSerpEnriched()) continue;   // đã FULL → bỏ qua
+            String q = act.getSearchQuery();
+            if (q == null || q.isBlank()) continue;
+            boolean preferSerp = type == ActivityType.FOOD || type == ActivityType.ATTRACTION;
+            groups.putIfAbsent(placeEnrichmentService.canonicalKey(q),
+                    new BgEnrich(q, trip.getDestination(), List.of(), preferSerp, 0));
+        }
+        if (groups.isEmpty()) return 0;
+        int stillIncomplete = 0;
+        // forceRefresh sau lần thử đầu để bỏ qua backoff nếu row vẫn kẹt serpEnriched=false.
+        boolean forceRefresh = trip.getEnrichmentAttempts() > 0;
+        for (BgEnrich b : groups.values()) {
+            if (!enrichOnce(b, forceRefresh)) stillIncomplete++;
+        }
+        return stillIncomplete;
+    }
+
     @Override
     @Transactional(readOnly = true)
     public Page<TripSummaryResponse> getMyTrips(Long userId, Pageable pageable) {
@@ -642,16 +734,10 @@ class TripServiceImpl implements TripService {
             placeCacheRepository.findAllById(placeCacheIds).forEach(p -> cacheMap.put(p.getId(), p));
         }
 
-        // Còn enrich nền? Place chưa FULL (serpEnriched=false) VÀ vừa được đụng tới gần đây
-        // (lastSyncedAt trong cửa sổ grace). Dùng MỐC THỜI GIAN thay vì serpSyncedAt==null để:
-        //  (1) cờ giữ true xuyên suốt pass1 + retry-pass nền → FE còn poll, thấy ảnh/review 429 hồi phục;
-        //  (2) cờ KHÔNG kẹt true vĩnh viễn nếu 1 row BASIC không bao giờ được nâng (vd dedup nâng row khác,
-        //      hoặc enrich fail để serpSyncedAt=null) — quá grace thì thôi tính; trip cũ xem lại cũng không bật cờ.
-        LocalDateTime enrichGraceThreshold = LocalDateTime.now().minus(ENRICHING_GRACE);
-        boolean enriching = cacheMap.values().stream()
-                .anyMatch(p -> !p.isSerpEnriched()
-                        && p.getLastSyncedAt() != null
-                        && p.getLastSyncedAt().isAfter(enrichGraceThreshold));
+        // Còn enrich nền? Đọc TRỰC TIẾP cờ persist trip.enrichmentPending (bật lúc tạo trip nếu có
+        // việc enrich nền; job nền / TripEnrichmentScheduler tắt khi xong) — durable, thay heuristic
+        // lastSyncedAt+grace cũ vốn có thể tắt sớm khi job nền chết, khiến FE ngừng poll dù data chưa FULL.
+        boolean enriching = trip.isEnrichmentPending();
 
         List<TripDetailResponse.DayDetail> dayDetails = days.stream().map(day -> {
             List<Activity> activities = activityRepository.findByDayIdOrderByDisplayOrder(day.getId());

@@ -39,4 +39,11 @@ public interface TripService {
 
     /** Xem trip public (feed Khám phá) — trả 404 nếu trip không tồn tại hoặc is_public=false. */
     TripDetailResponse getPublicTrip(Long tripId);
+
+    /**
+     * Bảo trì nội bộ (gọi bởi TripEnrichmentScheduler): quét các trip còn enrichmentPending mà job
+     * enrich nền in-memory đã mất (app restart / queue đầy / provider down) rồi enrich lại từ DB.
+     * Durable safety-net cho enrich nền ngày 2..N.
+     */
+    void sweepPendingEnrichments();
 }

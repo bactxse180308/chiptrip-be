@@ -66,13 +66,14 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
     public TripGenerateResponse persistGeneratedTrip(Long userId,
                                                      GenerateTripRequest request,
                                                      AiCallResult aiResult,
-                                                     Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces) {
+                                                     Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces,
+                                                     boolean needsBackgroundEnrichment) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
 
         AiItineraryResult itinerary = aiResult.itinerary();
 
-        Trip trip = buildAndSaveTrip(user, request, itinerary);
+        Trip trip = buildAndSaveTrip(user, request, itinerary, needsBackgroundEnrichment);
         tripMemberService.seedOwner(trip, user);
 
         List<TripGenerateResponse.DayDetail> dayDetails = new ArrayList<>();
@@ -128,7 +129,8 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                 .build();
     }
 
-    private Trip buildAndSaveTrip(User user, GenerateTripRequest request, AiItineraryResult itinerary) {
+    private Trip buildAndSaveTrip(User user, GenerateTripRequest request, AiItineraryResult itinerary,
+                                  boolean needsBackgroundEnrichment) {
         List<String> styleList = request.getStyles() != null ? request.getStyles() : List.of();
         String stylesJson;
         try {
@@ -159,6 +161,7 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
                 .generatedAsPremium(premiumTrip)
                 .activitySwapFreeLimit(premiumTrip ? 4 : 0)
                 .activitySwapFreeUsed(0)
+                .enrichmentPending(needsBackgroundEnrichment)
                 .build();
         return tripRepository.save(trip);
     }
@@ -199,10 +202,15 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
             ActivityType activityType = parseActivityType(aiActivity.getType());
             PlaceCache p = resolvedPlaces != null ? resolvedPlaces.get(aiActivity) : null;
 
-            // Activity geocodable (có searchQuery) nhưng không resolve được tọa độ → đếm để cảnh báo FE
-            if (p == null && shouldGeocode(activityType)
-                    && aiActivity.getSearchQuery() != null && !aiActivity.getSearchQuery().isBlank()) {
+            // Activity thuộc type cần lên bản đồ nhưng KHÔNG có tọa độ → đếm để FE cảnh báo (P1).
+            // Tính CẢ trường hợp searchQuery rỗng (AI bỏ trống → resolvePlaces tự skip): với người dùng,
+            // điểm này cũng không hiện pin bản đồ, nên im lặng bỏ qua là che giấu lỗi. OTHER không tính.
+            if (p == null && shouldGeocode(activityType)) {
                 geocodeFailed++;
+                if (aiActivity.getSearchQuery() == null || aiActivity.getSearchQuery().isBlank()) {
+                    log.warn("Activity '{}' (type={}) thiếu searchQuery → không định vị được trên bản đồ",
+                            aiActivity.getName(), activityType);
+                }
             }
 
             long cost = aiActivity.getCostVnd() != null ? Math.max(0, aiActivity.getCostVnd()) : 0L;

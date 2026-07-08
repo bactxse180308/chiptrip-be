@@ -26,9 +26,13 @@ public interface TripGenerationPersistenceService {
      *
      * @param resolvedPlaces identity-map từ AiActivity → PlaceCache đã resolve (có thể không
      *                       chứa entry nếu activity không cần / không geocode được)
+     * @param needsBackgroundEnrichment true nếu còn địa điểm cần enrich FULL ở nền → set
+     *                       {@code Trip.enrichmentPending} để FE poll tiếp + sweeper hoàn tất khi
+     *                       job nền chết (durable). Xem {@code TripEnrichmentScheduler}.
      */
     TripGenerateResponse persistGeneratedTrip(Long userId,
                                               GenerateTripRequest request,
                                               AiCallResult aiResult,
-                                              Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces);
+                                              Map<AiItineraryResult.AiActivity, PlaceCache> resolvedPlaces,
+                                              boolean needsBackgroundEnrichment);
 }

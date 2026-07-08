@@ -12,6 +12,7 @@ import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
 import com.tranbac.chiptripbe.module.trip.service.TripExportService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
 import com.tranbac.chiptripbe.module.trip.service.impl.AsyncTripGenerator;
+import com.tranbac.chiptripbe.module.trip.service.impl.TripGenerationLock;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -36,6 +37,7 @@ public class TripController {
     private final TripService tripService;
     private final TripExportService tripExportService;
     private final AsyncTripGenerator asyncTripGenerator;
+    private final TripGenerationLock tripGenerationLock;
 
     @Operation(summary = "Sinh lịch trình bằng AI (trừ 1 lượt AI)")
     @SecurityRequirement(name = "bearerAuth")
@@ -44,8 +46,15 @@ public class TripController {
     public ResponseEntity<ApiResponse<TripGenerateResponse>> generateTrip(
             @AuthenticationPrincipal UserPrincipal principal,
             @Valid @RequestBody GenerateTripRequest request) {
-        return ResponseEntity.status(HttpStatus.CREATED)
-                .body(ApiResponse.created(tripService.generateTrip(principal.getId(), request)));
+        Long userId = principal.getId();
+        // 409 nếu user đang có job generate khác chạy (sync HOẶC async) → chống tạo trùng + đốt provider call
+        tripGenerationLock.acquire(userId);
+        try {
+            return ResponseEntity.status(HttpStatus.CREATED)
+                    .body(ApiResponse.created(tripService.generateTrip(userId, request)));
+        } finally {
+            tripGenerationLock.release(userId);
+        }
     }
 
     @Operation(summary = "Sinh lịch trình bằng AI (bất đồng bộ — kết quả đẩy qua WebSocket /user/queue/trip-generation)")
@@ -58,11 +67,11 @@ public class TripController {
         // Validate đồng bộ để fail-fast (402/400/403) + dính rate limit; việc nặng chạy ở luồng nền.
         Long userId = principal.getId();
         tripService.validateGenerateRequest(userId, request);
-        asyncTripGenerator.begin(userId);   // 409 nếu user đang có job generate khác chạy → chống tạo trùng/trừ trùng
+        tripGenerationLock.acquire(userId);   // 409 nếu user đang có job generate khác chạy → chống tạo trùng/trừ trùng
         try {
             asyncTripGenerator.run(userId, request);
         } catch (RuntimeException e) {
-            asyncTripGenerator.release(userId);   // submit async thất bại → nhả khóa, không kẹt
+            tripGenerationLock.release(userId);   // submit async thất bại → nhả khóa, không kẹt
             throw e;
         }
         return ResponseEntity.accepted().body(ApiResponse.noContent());

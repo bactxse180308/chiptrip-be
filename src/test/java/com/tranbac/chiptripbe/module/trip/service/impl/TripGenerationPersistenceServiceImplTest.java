@@ -8,6 +8,7 @@ import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
 import com.tranbac.chiptripbe.module.notification.event.AiCreditsLowEvent;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.entity.Trip;
 import com.tranbac.chiptripbe.module.trip.entity.TripDay;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
@@ -115,7 +116,7 @@ class TripGenerationPersistenceServiceImplTest {
         when(creditService.consumeForGenerate(USER_ID)).thenThrow(AppException.dailyTrialUsed());
 
         AppException ex = assertThrows(AppException.class,
-                () -> service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap()));
+                () -> service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap(), false));
 
         assertEquals("DAILY_TRIAL_USED", ex.getCode());
         verify(eventPublisher, never()).publishEvent(any());
@@ -127,7 +128,7 @@ class TripGenerationPersistenceServiceImplTest {
         when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(500);
 
         assertDoesNotThrow(() ->
-                service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap()));
+                service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap(), false));
 
         verify(creditService, times(1)).consumeForGenerate(USER_ID);
         verify(eventPublisher, never()).publishEvent(any(AiCreditsLowEvent.class));
@@ -145,7 +146,7 @@ class TripGenerationPersistenceServiceImplTest {
         when(creditService.consumeForGenerate(USER_ID)).thenReturn(CreditSource.PAID);
         when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(75);
 
-        service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap());
+        service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap(), false);
 
         verify(creditService, times(1)).consumeForGenerate(USER_ID);
         verify(eventPublisher, times(1)).publishEvent(any(AiCreditsLowEvent.class));
@@ -157,9 +158,54 @@ class TripGenerationPersistenceServiceImplTest {
         when(creditService.consumeForGenerate(USER_ID)).thenReturn(CreditSource.TRIAL);
         when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(0);
 
-        service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap());
+        service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap(), false);
 
         verify(eventPublisher, never()).publishEvent(any(AiCreditsLowEvent.class));
+    }
+
+    @Test
+    void persistGeneratedTrip_geocodableActivityMissingSearchQuery_countedAsGeocodeFailed() {
+        // P1: FOOD không có searchQuery + không resolve được place → vẫn phải đếm vào geocodeFailedCount
+        // (im lặng bỏ qua sẽ che giấu việc điểm không hiện trên bản đồ).
+        when(creditService.consumeForGenerate(USER_ID)).thenReturn(CreditSource.PAID);
+        when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(500);
+
+        AiItineraryResult r = new AiItineraryResult();
+        r.setTitle("Đà Lạt 1 ngày");
+        AiItineraryResult.AiDay day = new AiItineraryResult.AiDay();
+        day.setDayNumber(1);
+        day.setDate("2026-07-01");
+        AiItineraryResult.AiActivity noQuery = new AiItineraryResult.AiActivity();
+        noQuery.setTime("08:00");
+        noQuery.setName("Ăn sáng tại khách sạn");
+        noQuery.setType("FOOD");
+        noQuery.setCostVnd(0L);
+        noQuery.setSearchQuery(null);   // AI bỏ trống → skip geocode
+        AiItineraryResult.AiActivity other = new AiItineraryResult.AiActivity();
+        other.setTime("09:00");
+        other.setName("Nghỉ ngơi");
+        other.setType("OTHER");         // OTHER không tính
+        other.setCostVnd(0L);
+        day.setActivities(List.of(noQuery, other));
+        r.setDays(List.of(day));
+        r.setChecklist(List.of());
+
+        TripGenerateResponse resp = service.persistGeneratedTrip(
+                USER_ID, request(), new AiCallResult(r, 10, 20), Collections.emptyMap(), false);
+
+        assertEquals(1, resp.getGeocodeFailedCount());
+    }
+
+    @Test
+    void persistGeneratedTrip_needsBackgroundEnrichment_setsEnrichmentPendingFlag() {
+        when(creditService.consumeForGenerate(USER_ID)).thenReturn(CreditSource.PAID);
+        when(userRepository.findAiCreditUnitsById(USER_ID)).thenReturn(500);
+
+        service.persistGeneratedTrip(USER_ID, request(), aiResult(), Collections.emptyMap(), true);
+
+        ArgumentCaptor<Trip> tripCaptor = ArgumentCaptor.forClass(Trip.class);
+        verify(tripRepository).save(tripCaptor.capture());
+        assertTrue(tripCaptor.getValue().isEnrichmentPending());
     }
 
     // ─── helpers ──────────────────────────────────────────────────────────────

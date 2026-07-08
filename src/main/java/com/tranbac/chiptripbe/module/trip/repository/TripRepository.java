@@ -10,6 +10,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -60,6 +61,26 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
     @Modifying
     @Query("UPDATE Trip t SET t.commentsCount = t.commentsCount + :delta WHERE t.id = :tripId")
     void updateCommentsCount(@Param("tripId") Long tripId, @Param("delta") int delta);
+
+    /**
+     * Durable enrich sweeper: trip còn enrichmentPending, đã tạo đủ lâu (job nền in-memory lẽ ra
+     * xong hoặc đã chết), chưa vượt trần số lần thử. ORDER BY createdAt → xử lý chuyến cũ trước.
+     */
+    @Query("SELECT t FROM Trip t WHERE t.enrichmentPending = true " +
+           "AND t.createdAt < :createdBefore AND t.enrichmentAttempts < :maxAttempts " +
+           "ORDER BY t.createdAt ASC")
+    List<Trip> findPendingEnrichment(@Param("createdBefore") LocalDateTime createdBefore,
+                                     @Param("maxAttempts") int maxAttempts, Pageable pageable);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Trip t SET t.enrichmentPending = false WHERE t.id = :tripId")
+    void markEnrichmentDone(@Param("tripId") Long tripId);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Trip t SET t.enrichmentAttempts = t.enrichmentAttempts + 1 WHERE t.id = :tripId")
+    void incrementEnrichmentAttempts(@Param("tripId") Long tripId);
 
     @Query("SELECT YEAR(t.createdAt), MONTH(t.createdAt), DAY(t.createdAt), COUNT(t) " +
            "FROM Trip t WHERE t.createdAt >= :from AND t.createdAt <= :to " +

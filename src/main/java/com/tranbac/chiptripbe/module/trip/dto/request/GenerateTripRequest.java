@@ -34,4 +34,20 @@ public class GenerateTripRequest {
     private Long budgetVnd;
 
     private java.util.List<String> styles;
+
+    /**
+     * "roundtrip" | "oneway" (nullable). Ảnh hưởng có/không chặng di chuyển VỀ ở ngày cuối.
+     * Null → coi như khứ hồi (mặc định an toàn cho client cũ chưa gửi trường này).
+     */
+    private String tripType;
+
+    /** Giờ khởi hành ngày đầu "HH:mm" (nullable) — để AI xếp lịch ngày 1 thực tế theo giờ tới nơi. */
+    private String departureTime;
+
+    /** Giờ về dự kiến ngày cuối "HH:mm" (nullable) — chỉ dùng khi khứ hồi. */
+    private String returnTime;
+
+    /** Số vé di chuyển (nullable) — mặc định theo số người nếu trống. */
+    @Min(value = 1, message = "Số vé tối thiểu là 1")
+    private Integer tickets;
 }

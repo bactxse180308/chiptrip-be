@@ -176,6 +176,14 @@ class AiGenerateServiceImpl implements AiService {
                 ? request.getPeopleCount() : 1;
         long budgetPerPerson = request.getBudgetVnd() / peopleCount;
 
+        // Logistics do FE gửi (giờ đi/về, một chiều/khứ hồi, số vé) — null → mặc định an toàn.
+        boolean roundTrip = request.getTripType() == null
+                || !"oneway".equalsIgnoreCase(request.getTripType().trim());
+        String departureTime = normalizeTime(request.getDepartureTime());
+        String returnTime = normalizeTime(request.getReturnTime());
+        int tickets = (request.getTickets() != null && request.getTickets() > 0)
+                ? request.getTickets() : peopleCount;
+
         // #6: du lịch tại chỗ (điểm khởi hành trùng điểm đến) thì KHÔNG yêu cầu chặng di chuyển liên tỉnh
         String firstDayLine = isSameLocation(request.getDeparture(), request.getDestination())
                 ? String.format("- Du lịch tại chỗ ở %s: KHÔNG thêm chặng di chuyển liên tỉnh, tập trung khám phá trong %s.",
@@ -226,6 +234,9 @@ class AiGenerateServiceImpl implements AiService {
                 numDays
         );
 
+        // Giờ đi/về + một chiều/khứ hồi + số vé → ảnh hưởng chặng TRANSPORT và giờ xếp hoạt động.
+        userPrompt += buildLogisticsBlock(request, roundTrip, departureTime, returnTime, tickets);
+
         // Cá nhân hóa theo gu du lịch đã lưu trong hồ sơ (User.preferences) —
         // chỉ là tín hiệu ưu tiên, KHÔNG ghi đè "Phong cách" user chọn cho chuyến này
         String preferencesText = formatPreferences(userPreferences);
@@ -246,6 +257,47 @@ class AiGenerateServiceImpl implements AiService {
                 "response_format", Map.of("type", "json_object"),
                 "temperature", 0.7
         );
+    }
+
+    /**
+     * Khối "Thông tin di chuyển" gắn vào cuối user prompt — làm giờ đi/về, một chiều/khứ hồi,
+     * số vé THỰC SỰ ảnh hưởng lịch trình (trước đây FE gửi nhưng BE bỏ qua). Chỉ thêm dòng nào áp dụng.
+     */
+    private String buildLogisticsBlock(GenerateTripRequest request, boolean roundTrip,
+                                       String departureTime, String returnTime, int tickets) {
+        boolean sameLocation = isSameLocation(request.getDeparture(), request.getDestination());
+        StringBuilder sb = new StringBuilder("\n\nThông tin di chuyển (BẮT BUỘC tuân thủ khi xếp lịch):\n");
+        if (sameLocation) {
+            sb.append("- Du lịch tại chỗ: không có chặng di chuyển liên tỉnh.\n");
+        } else if (roundTrip) {
+            sb.append(String.format("- Chuyến KHỨ HỒI: ngày cuối phải có chặng TRANSPORT quay về %s.\n",
+                    request.getDeparture()));
+        } else {
+            sb.append(String.format("- Chuyến MỘT CHIỀU: KHÔNG thêm chặng di chuyển về %s ở ngày cuối.\n",
+                    request.getDeparture()));
+        }
+        if (departureTime != null) {
+            sb.append(String.format("- Giờ khởi hành ngày đầu: %s — xếp hoạt động ngày 1 SAU khi đã tới nơi, "
+                    + "không đặt hoạt động trước giờ này.\n", departureTime));
+        }
+        if (returnTime != null && roundTrip && !sameLocation) {
+            sb.append(String.format("- Giờ về dự kiến ngày cuối: %s — đặt chặng về quanh giờ này và KHÔNG "
+                    + "xếp hoạt động sau giờ đó.\n", returnTime));
+        }
+        sb.append(String.format("- Số vé di chuyển: %d (costVnd của TRANSPORT tính cho %d vé).\n",
+                tickets, tickets));
+        return sb.toString();
+    }
+
+    /** Chuẩn hóa "HH:mm"; trả null nếu trống/không hợp lệ (để không nhồi giờ rác vào prompt). */
+    private static String normalizeTime(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return null;
+        try {
+            return java.time.LocalTime.parse(raw.trim(), DateTimeFormatter.ofPattern("HH:mm"))
+                    .format(DateTimeFormatter.ofPattern("HH:mm"));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

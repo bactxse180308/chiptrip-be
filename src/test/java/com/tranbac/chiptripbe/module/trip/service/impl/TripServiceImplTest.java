@@ -1,12 +1,16 @@
 package com.tranbac.chiptripbe.module.trip.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tranbac.chiptripbe.common.enums.ActivityType;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
+import com.tranbac.chiptripbe.module.trip.entity.Activity;
+import com.tranbac.chiptripbe.module.trip.entity.Trip;
+import com.tranbac.chiptripbe.module.trip.entity.TripDay;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
 import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
@@ -33,6 +37,7 @@ import org.mockito.quality.Strictness;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
@@ -43,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -288,6 +294,37 @@ class TripServiceImplTest {
         verify(backgroundEnrichmentExecutor, never()).execute(any(Runnable.class));
     }
 
+    @Test
+    void sweepPendingEnrichments_reEnrichesNotFullPlaceThenMarksDone() {
+        // P1 durable: trip còn pending → sweeper reconstruct từ DB, enrich lại thành công → tắt cờ.
+        Trip trip = Trip.builder().destination("Đà Lạt").enrichmentPending(true).build();
+        trip.setId(77L);
+        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class), eq(3), any()))
+                .thenReturn(List.of(trip));
+
+        TripDay day = TripDay.builder().dayNumber(1).build();
+        day.setId(11L);
+        when(tripDayRepository.findByTripIdOrderByDayNumber(77L)).thenReturn(List.of(day));
+
+        Activity act = Activity.builder()
+                .type(ActivityType.FOOD)
+                .searchQuery("Cafe Tùng Đà Lạt")
+                .placeCacheId(7L)
+                .build();
+        when(activityRepository.findByDayIdOrderByDisplayOrder(11L)).thenReturn(List.of(act));
+
+        PlaceCache basic = cache(false);   // BASIC/serp-miss → cần enrich lại
+        basic.setId(7L);
+        when(placeCacheRepository.findAllById(anyList())).thenReturn(List.of(basic));
+        when(placeEnrichmentService.canonicalKey("Cafe Tùng Đà Lạt")).thenReturn("cafe tung da lat");
+        whenBackgroundResolve("Cafe Tùng Đà Lạt").thenReturn(Optional.of(cache(true)));
+
+        service.sweepPendingEnrichments();
+
+        verify(tripRepository).markEnrichmentDone(77L);
+        verify(tripRepository, never()).incrementEnrichmentAttempts(anyLong());
+    }
+
     private void stubUser(User user) {
         when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
     }
@@ -322,7 +359,7 @@ class TripServiceImplTest {
         when(aiService.generateItinerary(eq(req), isNull())).thenReturn(aiResult);
         when(placeEnrichmentService.geocodeAnchor(anyString())).thenReturn(Optional.empty());
         when(placeEnrichmentService.canonicalKey(anyString())).thenAnswer(inv -> inv.getArgument(0));
-        when(tripGenerationPersistenceService.persistGeneratedTrip(eq(USER_ID), eq(req), eq(aiResult), anyMap()))
+        when(tripGenerationPersistenceService.persistGeneratedTrip(eq(USER_ID), eq(req), eq(aiResult), anyMap(), anyBoolean()))
                 .thenReturn(TripGenerateResponse.builder().id(99L).build());
     }
 

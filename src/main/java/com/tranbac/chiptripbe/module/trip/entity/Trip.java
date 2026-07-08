@@ -95,6 +95,21 @@ public class Trip extends BaseAuditEntity {
     @Builder.Default
     private Integer activitySwapFreeUsed = 0;
 
+    /**
+     * Còn địa điểm ngày 2..N cần enrich FULL (ảnh/review) ở luồng nền. Persist bật true lúc tạo trip
+     * nếu có việc enrich nền; job nền (hoặc TripEnrichmentScheduler khi job nền chết) tắt về false khi xong.
+     * FE đọc cờ này (qua TripDetailResponse.enriching) để biết còn poll hay không → durable, không phụ
+     * thuộc executor in-memory. Xem TripEnrichmentScheduler.
+     */
+    @Column(name = "enrichment_pending", columnDefinition = "bit NOT NULL DEFAULT 0")
+    @Builder.Default
+    private boolean enrichmentPending = false;
+
+    /** Số lần sweeper đã thử enrich lại — trần chống loop vô hạn cho địa điểm không bao giờ có data. */
+    @Column(name = "enrichment_attempts", columnDefinition = "INT NOT NULL DEFAULT 0")
+    @Builder.Default
+    private Integer enrichmentAttempts = 0;
+
     @OneToMany(mappedBy = "trip", cascade = CascadeType.ALL,
             orphanRemoval = true, fetch = FetchType.LAZY)
     @OrderBy("dayNumber ASC")

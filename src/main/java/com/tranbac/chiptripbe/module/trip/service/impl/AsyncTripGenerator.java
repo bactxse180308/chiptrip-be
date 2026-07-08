@@ -12,9 +12,6 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
  * Worker chạy sinh lịch trình ở luồng nền (sau khi controller đã validate đồng bộ), rồi đẩy kết quả
  * về đúng user qua WebSocket. Tách khỏi luồng HTTP để client không phải giữ 1 kết nối dài (~30-90s) —
@@ -22,6 +19,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * Trip vẫn được persist trong generateTrip (nguồn chân lý); WS chỉ là tín hiệu best-effort —
  * nếu push thất bại, user vẫn thấy chuyến trong "Chuyến đi của tôi".
+ *
+ * Khóa per-user chống trùng nằm ở {@link TripGenerationLock} (dùng chung với luồng sync):
+ * controller acquire ĐỒNG BỘ trước khi submit; worker release ở finally.
  */
 @Slf4j
 @Component
@@ -32,21 +32,7 @@ public class AsyncTripGenerator {
 
     private final TripService tripService;
     private final SimpMessagingTemplate messagingTemplate;
-
-    /** Khóa per-user chống chạy 2 job generate đồng thời (tránh tạo trùng trip + trừ trùng credit). */
-    private final Set<Long> inFlightUsers = ConcurrentHashMap.newKeySet();
-
-    /** Đánh dấu user bắt đầu 1 job; ném 409 nếu đã có job đang chạy. Gọi ĐỒNG BỘ ở controller. */
-    public void begin(Long userId) {
-        if (!inFlightUsers.add(userId)) {
-            throw AppException.conflict("Bạn đang có một lịch trình đang được tạo. Vui lòng đợi hoàn tất.");
-        }
-    }
-
-    /** Nhả khóa khi không submit được job (vd executor từ chối ngay). */
-    public void release(Long userId) {
-        inFlightUsers.remove(userId);
-    }
+    private final TripGenerationLock tripGenerationLock;
 
     @Async("tripGenerateExecutor")
     public void run(Long userId, GenerateTripRequest request) {
@@ -63,7 +49,7 @@ public class AsyncTripGenerator {
             push(userId, TripGenerationResultDto.failed(
                     "AI không thể tạo lịch trình lúc này. Vui lòng thử lại sau."));
         } finally {
-            inFlightUsers.remove(userId);
+            tripGenerationLock.release(userId);
         }
     }
 
