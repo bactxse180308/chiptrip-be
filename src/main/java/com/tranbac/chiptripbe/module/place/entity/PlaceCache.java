@@ -128,9 +128,21 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "serp_synced_at", columnDefinition = "DATETIME2")
     private LocalDateTime serpSyncedAt;
 
+    /** True khi Goong + SerpApi da xac nhan khong tim thay; khong set khi provider tam loi. */
+    @Column(name = "not_found", columnDefinition = "bit NOT NULL DEFAULT 0")
+    @Builder.Default
+    private boolean notFound = false;
+
+    /** Thoi diem ghi negative-cache. TTL ngan hon cache thanh cong de tranh giu miss qua lau. */
+    @Column(name = "not_found_at", columnDefinition = "DATETIME2")
+    private LocalDateTime notFoundAt;
+
+    @Column(name = "not_found_reason", length = 255)
+    private String notFoundReason;
+
     /**
-     * True khi SerpApi đã trả về data đủ dùng để hiển thị Google Maps card:
-     * basic info (rating/phone/website) + photos + (opening hours hoặc reviews).
+     * True khi SerpApi da tra ve data du dung de hien thi Google Maps card:
+     * basic info (rating/phone/website) + photos + (opening hours hoac reviews).
      */
     @Column(name = "serp_enriched", columnDefinition = "bit NOT NULL DEFAULT 0")
     @Builder.Default

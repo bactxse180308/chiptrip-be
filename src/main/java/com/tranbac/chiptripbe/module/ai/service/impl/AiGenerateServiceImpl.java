@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.config.AiProperties;
 import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.common.resilience.ProviderResilience;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.service.AiItineraryValidator;
@@ -35,6 +36,7 @@ class AiGenerateServiceImpl implements AiService {
     private final ObjectMapper objectMapper;
     private final AiItineraryValidator aiItineraryValidator;
     private final AiKeyPool aiKeyPool;
+    private final ProviderResilience providerResilience;
 
     private WebClient aiApiClient;
 
@@ -322,12 +324,29 @@ class AiGenerateServiceImpl implements AiService {
     // ─── HTTP call ────────────────────────────────────────────────────────────
 
     private Map<String, Object> callLlm(Map<String, Object> body, String apiKey) {
+        return providerResilience.execute(ProviderResilience.LLM,
+                () -> callLlmInternal(body, apiKey),
+                () -> {
+                    throw new AiRetryableException("AI provider cooldown/circuit open");
+                });
+    }
+
+    private Map<String, Object> callLlmInternal(Map<String, Object> body, String apiKey) {
         return aiApiClient.post()
                 .uri("/chat/completions")
                 .header("Authorization", "Bearer " + apiKey)
                 .bodyValue(body)
                 .retrieve()
-                .onStatus(status -> status.value() == 429 || status.value() == 401 || status.value() == 403,
+                .onStatus(status -> status.value() == 429,
+                        response -> response.bodyToMono(String.class)
+                                .defaultIfEmpty("")
+                                .map(errorBody -> {
+                                    providerResilience.honorRetryAfter(ProviderResilience.LLM,
+                                            response.headers().asHttpHeaders(), Duration.ofSeconds(60),
+                                            "AI HTTP 429");
+                                    return (Throwable) new AiKeyExhaustedException("AI HTTP 429: " + errorBody);
+                                }))
+                .onStatus(status -> status.value() == 401 || status.value() == 403,
                         response -> response.bodyToMono(String.class)
                                 .map(errorBody -> (Throwable) new AiKeyExhaustedException(
                                         "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
@@ -337,8 +356,17 @@ class AiGenerateServiceImpl implements AiService {
                                         "AI HTTP 400: " + errorBody)))
                 .onStatus(status -> status.is4xxClientError() || status.is5xxServerError(),
                         response -> response.bodyToMono(String.class)
-                                .map(errorBody -> (Throwable) new AiRetryableException(
-                                        "AI HTTP " + response.statusCode().value() + ": " + errorBody)))
+                                .defaultIfEmpty("")
+                                .map(errorBody -> {
+                                    int status = response.statusCode().value();
+                                    if (status == 503) {
+                                        providerResilience.honorRetryAfter(ProviderResilience.LLM,
+                                                response.headers().asHttpHeaders(), Duration.ofSeconds(60),
+                                                "AI HTTP 503");
+                                    }
+                                    return (Throwable) new AiRetryableException(
+                                            "AI HTTP " + status + ": " + errorBody);
+                                }))
                 .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                 .timeout(Duration.ofSeconds(aiProperties.getTimeoutSeconds()))
                 .onErrorMap(TimeoutException.class,

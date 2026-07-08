@@ -29,7 +29,19 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
                 ? repository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalizedName)
                 : repository.findFirstByNormalizedNameAndNormalizedDestination(normalizedName, normalizedDestination);
 
-        return match.filter(this::isFresh);
+        return match.filter(place -> !place.isNotFound()).filter(this::isFresh);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public boolean isFreshNotFound(String normalizedName, String normalizedDestination) {
+        if (normalizedName == null || normalizedName.isBlank()) return false;
+
+        Optional<PlaceCache> match = (normalizedDestination == null || normalizedDestination.isBlank())
+                ? repository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalizedName)
+                : repository.findFirstByNormalizedNameAndNormalizedDestination(normalizedName, normalizedDestination);
+
+        return match.filter(PlaceCache::isNotFound).filter(this::isFreshNotFound).isPresent();
     }
 
     /**
@@ -40,6 +52,27 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public PlaceCache save(PlaceCache place) {
+        clearNotFound(place);
+        return repository.save(place);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public PlaceCache saveNotFound(String name, String normalizedName, String normalizedDestination, String reason) {
+        Optional<PlaceCache> existing = (normalizedDestination == null || normalizedDestination.isBlank())
+                ? repository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalizedName)
+                : repository.findFirstByNormalizedNameAndNormalizedDestination(normalizedName, normalizedDestination);
+
+        PlaceCache place = existing.orElseGet(PlaceCache::new);
+        place.setName((name == null || name.isBlank()) ? normalizedName : name);
+        place.setNormalizedName(normalizedName);
+        place.setNormalizedDestination(normalizedDestination);
+        place.setNotFound(true);
+        place.setNotFoundAt(LocalDateTime.now());
+        place.setNotFoundReason(reason);
+        place.setLastSyncedAt(null);
+        place.setSerpSyncedAt(null);
+        place.setSerpEnriched(false);
         return repository.save(place);
     }
 
@@ -66,9 +99,13 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
                                                   String photosJson,
                                                   String reviewsJson) {
         if (place == null) return null;
-        if (place.getId() == null) return repository.save(place);
+        if (place.getId() == null) {
+            clearNotFound(place);
+            return repository.save(place);
+        }
 
         PlaceCache current = repository.findById(place.getId()).orElseGet(() -> repository.save(place));
+        clearNotFound(current);
         if (bookingUrl != null && !bookingUrl.isBlank()) {
             current.setBookingUrl(bookingUrl);
         }
@@ -85,6 +122,13 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
             current.setReviewsJson(reviewsJson);
         }
         return current;
+    }
+
+    private void clearNotFound(PlaceCache place) {
+        if (place == null) return;
+        place.setNotFound(false);
+        place.setNotFoundAt(null);
+        place.setNotFoundReason(null);
     }
 
     /**
@@ -106,5 +150,11 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
         if (place.getSerpSyncedAt() == null) return false;
         LocalDateTime backoffUntil = place.getSerpSyncedAt().plusMinutes(serpApiProperties.getRetryBackoffMinutes());
         return now.isBefore(backoffUntil);
+    }
+
+    private boolean isFreshNotFound(PlaceCache place) {
+        if (place.getNotFoundAt() == null) return false;
+        int ttlHours = Math.max(1, serpApiProperties.getNegativeCacheTtlHours());
+        return LocalDateTime.now().isBefore(place.getNotFoundAt().plusHours(ttlHours));
     }
 }

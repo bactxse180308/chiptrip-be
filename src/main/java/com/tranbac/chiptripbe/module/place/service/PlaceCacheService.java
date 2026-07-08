@@ -14,7 +14,11 @@ public interface PlaceCacheService {
      */
     Optional<PlaceCache> findFreshCache(String normalizedName, String normalizedDestination);
 
+    boolean isFreshNotFound(String normalizedName, String normalizedDestination);
+
     PlaceCache save(PlaceCache place);
+
+    PlaceCache saveNotFound(String name, String normalizedName, String normalizedDestination, String reason);
 
     PlaceCache refreshLastSyncedAt(PlaceCache place, LocalDateTime lastSyncedAt);
 

@@ -1,6 +1,8 @@
 package com.tranbac.chiptripbe.module.geocoding.client;
 
 import com.tranbac.chiptripbe.common.config.GoongProperties;
+import com.tranbac.chiptripbe.common.config.ProviderResilienceProperties;
+import com.tranbac.chiptripbe.common.resilience.ProviderResilience;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -17,7 +19,10 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class GoongClientTest {
 
-    private final GoongClient client = new GoongClient(WebClient.builder(), new GoongProperties());
+    private final GoongClient client = new GoongClient(
+            WebClient.builder(),
+            new GoongProperties(),
+            new ProviderResilience(new ProviderResilienceProperties()));
 
     @Test
     void parseGeocodeResult_withCompound_returnsProvinceAndCommune() {

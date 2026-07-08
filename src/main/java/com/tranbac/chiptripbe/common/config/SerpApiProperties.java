@@ -26,4 +26,6 @@ public class SerpApiProperties {
     private int maxConcurrent = 3;
     /** Số giờ bỏ qua một key sau khi phát hiện hết lượt (HTTP 401), trước khi thử lại — quota free reset theo tháng */
     private int exhaustedCooldownHours = 6;
+    /** Cache ngắn hạn cho query địa điểm chắc chắn không tìm thấy; không dùng cho lỗi tạm thời. */
+    private int negativeCacheTtlHours = 6;
 }

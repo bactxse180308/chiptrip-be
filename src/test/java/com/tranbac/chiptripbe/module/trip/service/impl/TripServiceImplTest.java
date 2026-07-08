@@ -2,11 +2,15 @@ package com.tranbac.chiptripbe.module.trip.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
+import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
+import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
 import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityAlternativeSessionRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ChecklistItemRepository;
@@ -19,14 +23,15 @@ import com.tranbac.chiptripbe.module.trip.service.TripGenerationPersistenceServi
 import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
@@ -36,7 +41,15 @@ import java.util.concurrent.Executor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -68,8 +81,40 @@ class TripServiceImplTest {
     @Mock private PlaceCacheRepository placeCacheRepository;
     @Mock private TripGenerationPersistenceService tripGenerationPersistenceService;
     @Mock private Executor enrichmentExecutor;
+    @Mock private Executor backgroundEnrichmentExecutor;
 
-    @InjectMocks private TripServiceImpl service;
+    private TripServiceImpl service;
+
+    @BeforeEach
+    void runExecutorsSynchronously() {
+        service = new TripServiceImpl(
+                tripRepository,
+                tripDayRepository,
+                activityRepository,
+                activityAlternativeSessionRepository,
+                checklistItemRepository,
+                tripMemberRepository,
+                tripLikeRepository,
+                tripCommentRepository,
+                tripMemberService,
+                userRepository,
+                aiService,
+                aiUsageRepository,
+                objectMapper,
+                placeEnrichmentService,
+                placeCacheRepository,
+                tripGenerationPersistenceService,
+                enrichmentExecutor,
+                backgroundEnrichmentExecutor);
+        doAnswer(inv -> {
+            ((Runnable) inv.getArgument(0)).run();
+            return null;
+        }).when(enrichmentExecutor).execute(any(Runnable.class));
+        doAnswer(inv -> {
+            ((Runnable) inv.getArgument(0)).run();
+            return null;
+        }).when(backgroundEnrichmentExecutor).execute(any(Runnable.class));
+    }
 
     @Test
     void generateTrip_normalUserExceedsMaxDays_throwsLimitExceededBeforeAi() {
@@ -130,6 +175,119 @@ class TripServiceImplTest {
 
     // ─── helpers ──────────────────────────────────────────────────────────────
 
+    @Test
+    void generateTrip_foregroundResolveAlwaysDisablesScraper() {
+        LocalDate start = LocalDate.now(VN);
+        GenerateTripRequest req = request(start, start.plusDays(1), List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Day 1 food", "FOOD", "day-1-food")),
+                List.of(activity("Day 2 attraction", "ATTRACTION", "day-2-attraction")));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve("day-1-food", PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(true)));
+        whenForegroundResolve("day-2-attraction", PlaceEnrichmentService.EnrichmentDepth.BASIC)
+                .thenReturn(Optional.of(cache(true)));
+        whenBackgroundResolve("day-2-attraction")
+                .thenReturn(Optional.of(cache(true)));
+
+        service.generateTrip(USER_ID, req);
+
+        verify(placeEnrichmentService, times(2)).resolvePlace(
+                anyString(), anyString(), anyList(), any(Instant.class), anyBoolean(),
+                any(PlaceEnrichmentService.EnrichmentDepth.class), eq(false), eq(false));
+        verify(placeEnrichmentService, never()).resolvePlace(
+                anyString(), anyString(), anyList(), any(Instant.class), anyBoolean(),
+                any(PlaceEnrichmentService.EnrichmentDepth.class), anyBoolean(), eq(true));
+    }
+
+    @Test
+    void generateTrip_serpMissDay1AddsFullGroupToBackground() {
+        LocalDate start = LocalDate.now(VN);
+        String day1Query = "day-1-food";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Day 1 food", "FOOD", day1Query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(day1Query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(false)));
+        whenBackgroundResolve(day1Query)
+                .thenReturn(Optional.of(cache(true)));
+
+        service.generateTrip(USER_ID, req);
+
+        verify(backgroundEnrichmentExecutor).execute(any(Runnable.class));
+        verify(placeEnrichmentService).resolvePlace(
+                eq(day1Query), anyString(), anyList(), isNull(), eq(true),
+                eq(PlaceEnrichmentService.EnrichmentDepth.FULL), eq(false));
+    }
+
+    @Test
+    void generateTrip_serpHealthyFullGroupDoesNotEnterBackground() {
+        LocalDate start = LocalDate.now(VN);
+        String day1Query = "day-1-food";
+        String day2Query = "day-2-food";
+        GenerateTripRequest req = request(start, start.plusDays(1), List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Day 1 food", "FOOD", day1Query)),
+                List.of(activity("Day 2 food", "FOOD", day2Query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(day1Query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(true)));
+        whenForegroundResolve(day2Query, PlaceEnrichmentService.EnrichmentDepth.BASIC)
+                .thenReturn(Optional.of(cache(false)));
+        whenBackgroundResolve(day2Query)
+                .thenReturn(Optional.of(cache(true)));
+
+        service.generateTrip(USER_ID, req);
+
+        verify(placeEnrichmentService, never()).resolvePlace(
+                eq(day1Query), anyString(), anyList(), isNull(), anyBoolean(),
+                eq(PlaceEnrichmentService.EnrichmentDepth.FULL), anyBoolean());
+        verify(placeEnrichmentService).resolvePlace(
+                eq(day2Query), anyString(), anyList(), isNull(), eq(true),
+                eq(PlaceEnrichmentService.EnrichmentDepth.FULL), eq(false));
+    }
+
+    @Test
+    void generateTrip_basicDay2AlwaysEntersBackgroundEvenWhenForegroundCacheIsEnriched() {
+        LocalDate start = LocalDate.now(VN);
+        String day1Query = "day-1-food";
+        String day2Query = "day-2-food";
+        GenerateTripRequest req = request(start, start.plusDays(1), List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Day 1 food", "FOOD", day1Query)),
+                List.of(activity("Day 2 food", "FOOD", day2Query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(day1Query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(true)));
+        whenForegroundResolve(day2Query, PlaceEnrichmentService.EnrichmentDepth.BASIC)
+                .thenReturn(Optional.of(cache(true)));
+        whenBackgroundResolve(day2Query)
+                .thenReturn(Optional.of(cache(true)));
+
+        service.generateTrip(USER_ID, req);
+
+        verify(placeEnrichmentService).resolvePlace(
+                eq(day2Query), anyString(), anyList(), isNull(), eq(true),
+                eq(PlaceEnrichmentService.EnrichmentDepth.FULL), eq(false));
+    }
+
+    @Test
+    void generateTrip_oneDayFullyEnrichedDoesNotSubmitBackgroundJob() {
+        LocalDate start = LocalDate.now(VN);
+        String day1Query = "day-1-food";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Day 1 food", "FOOD", day1Query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(day1Query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(true)));
+
+        service.generateTrip(USER_ID, req);
+
+        verify(backgroundEnrichmentExecutor, never()).execute(any(Runnable.class));
+    }
+
     private void stubUser(User user) {
         when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
     }
@@ -156,5 +314,61 @@ class TripServiceImplTest {
         when(req.getPeopleCount()).thenReturn(2);
         when(req.getBudgetVnd()).thenReturn(5_000_000L);
         return req;
+    }
+
+    private void stubSuccessfulGenerate(GenerateTripRequest req, AiItineraryResult itinerary) {
+        stubUser(normalUser());
+        AiCallResult aiResult = new AiCallResult(itinerary, 10, 20);
+        when(aiService.generateItinerary(eq(req), isNull())).thenReturn(aiResult);
+        when(placeEnrichmentService.geocodeAnchor(anyString())).thenReturn(Optional.empty());
+        when(placeEnrichmentService.canonicalKey(anyString())).thenAnswer(inv -> inv.getArgument(0));
+        when(tripGenerationPersistenceService.persistGeneratedTrip(eq(USER_ID), eq(req), eq(aiResult), anyMap()))
+                .thenReturn(TripGenerateResponse.builder().id(99L).build());
+    }
+
+    @SafeVarargs
+    private final AiItineraryResult itinerary(LocalDate start, List<AiItineraryResult.AiActivity>... activitiesByDay) {
+        AiItineraryResult result = new AiItineraryResult();
+        result.setTitle("Generated trip");
+        List<AiItineraryResult.AiDay> days = new java.util.ArrayList<>();
+        for (int i = 0; i < activitiesByDay.length; i++) {
+            AiItineraryResult.AiDay day = new AiItineraryResult.AiDay();
+            day.setDayNumber(i + 1);
+            day.setDate(start.plusDays(i).toString());
+            day.setActivities(activitiesByDay[i]);
+            days.add(day);
+        }
+        result.setDays(days);
+        return result;
+    }
+
+    private AiItineraryResult.AiActivity activity(String name, String type, String searchQuery) {
+        AiItineraryResult.AiActivity activity = new AiItineraryResult.AiActivity();
+        activity.setTime("09:00");
+        activity.setName(name);
+        activity.setDescription(name);
+        activity.setType(type);
+        activity.setCostVnd(0L);
+        activity.setSearchQuery(searchQuery);
+        return activity;
+    }
+
+    private PlaceCache cache(boolean serpEnriched) {
+        PlaceCache cache = new PlaceCache();
+        cache.setName("cache");
+        cache.setSerpEnriched(serpEnriched);
+        return cache;
+    }
+
+    private org.mockito.stubbing.OngoingStubbing<Optional<PlaceCache>> whenForegroundResolve(
+            String query, PlaceEnrichmentService.EnrichmentDepth depth) {
+        return when(placeEnrichmentService.resolvePlace(
+                eq(query), anyString(), anyList(), any(Instant.class), anyBoolean(), eq(depth), eq(false), eq(false)));
+    }
+
+    private org.mockito.stubbing.OngoingStubbing<Optional<PlaceCache>> whenBackgroundResolve(String query) {
+        return when(placeEnrichmentService.resolvePlace(
+                eq(query), anyString(), anyList(), isNull(), anyBoolean(),
+                eq(PlaceEnrichmentService.EnrichmentDepth.FULL), anyBoolean()));
     }
 }

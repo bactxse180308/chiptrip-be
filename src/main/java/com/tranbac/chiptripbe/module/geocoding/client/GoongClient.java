@@ -1,11 +1,14 @@
 package com.tranbac.chiptripbe.module.geocoding.client;
 
 import com.tranbac.chiptripbe.common.config.GoongProperties;
+import com.tranbac.chiptripbe.common.resilience.ProviderResilience;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
+import org.springframework.web.util.UriBuilder;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.math.BigDecimal;
@@ -14,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * Client gọi Goong API v2.
@@ -26,6 +30,7 @@ public class GoongClient {
 
     private final WebClient.Builder webClientBuilder;
     private final GoongProperties properties;
+    private final ProviderResilience providerResilience;
 
     private WebClient client;
 
@@ -54,6 +59,8 @@ public class GoongClient {
 
     public record TravelSegment(int distanceMeters, int durationSeconds) {}
 
+    public record GeocodeLookup(Optional<GeocodeResult> result, ProviderLookupStatus status) {}
+
     /** Cache đơn giản cho Direction — route giữa 2 tọa độ không đổi nên cache vô thời hạn. */
     private static final int DIRECTION_CACHE_MAX = 5_000;
     private final ConcurrentHashMap<String, DirectionResult> directionCache = new ConcurrentHashMap<>();
@@ -64,35 +71,48 @@ public class GoongClient {
      */
     @SuppressWarnings("unchecked")
     public Optional<GeocodeResult> forwardGeocode(String query) {
-        if (query == null || query.isBlank()) return Optional.empty();
-        try {
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/v2/geocode")
-                            .queryParam("address", query)
-                            .queryParam("has_vnid", "true")
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+        return forwardGeocodeDetailed(query).result();
+    }
 
-            if (resp == null) return Optional.empty();
+    /**
+     * Variant co status de caller phan biet "khong tim thay that" voi "provider tam loi".
+     */
+    @SuppressWarnings("unchecked")
+    public GeocodeLookup forwardGeocodeDetailed(String query) {
+        if (query == null || query.isBlank()) {
+            return new GeocodeLookup(Optional.empty(), ProviderLookupStatus.NOT_FOUND);
+        }
+        try {
+            Map<String, Object> resp = getMap("forward geocode", "/v2/geocode", b -> b
+                    .queryParam("address", query)
+                    .queryParam("has_vnid", "true")
+                    .queryParam("api_key", properties.getApiKey()));
+
+            if (resp == null) {
+                return new GeocodeLookup(Optional.empty(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
+            }
 
             String status = (String) resp.get("status");
             if (!"OK".equals(status)) {
                 log.debug("Goong geocode status={} for query='{}'", status, query);
-                return Optional.empty();
+                return new GeocodeLookup(Optional.empty(), isNotFoundStatus(status)
+                        ? ProviderLookupStatus.NOT_FOUND
+                        : ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
             }
 
             List<Map<String, Object>> results = (List<Map<String, Object>>) resp.get("results");
-            if (results == null || results.isEmpty()) return Optional.empty();
+            if (results == null || results.isEmpty()) {
+                return new GeocodeLookup(Optional.empty(), ProviderLookupStatus.NOT_FOUND);
+            }
 
-            return parseGeocodeResult(results.get(0));
+            Optional<GeocodeResult> parsed = parseGeocodeResult(results.get(0));
+            return parsed
+                    .map(result -> new GeocodeLookup(Optional.of(result), ProviderLookupStatus.FOUND))
+                    .orElseGet(() -> new GeocodeLookup(Optional.empty(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE));
 
         } catch (Exception e) {
             log.warn("Goong forward geocode failed for query='{}': {}", query, e.getMessage());
-            return Optional.empty();
+            return new GeocodeLookup(Optional.empty(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
         }
     }
 
@@ -106,15 +126,9 @@ public class GoongClient {
     public Optional<GeocodeResult> placeDetail(String placeId) {
         if (placeId == null || placeId.isBlank()) return Optional.empty();
         try {
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/v2/place/detail")
-                            .queryParam("place_id", placeId)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = getMap("place detail", "/v2/place/detail", b -> b
+                    .queryParam("place_id", placeId)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return Optional.empty();
             Object resultObj = resp.get("result");
@@ -136,15 +150,9 @@ public class GoongClient {
     public List<AutocompleteResult> autocomplete(String input) {
         if (input == null || input.isBlank()) return List.of();
         try {
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/v2/place/autocomplete")
-                            .queryParam("input", input)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = getMap("autocomplete", "/v2/place/autocomplete", b -> b
+                    .queryParam("input", input)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return List.of();
 
@@ -178,17 +186,11 @@ public class GoongClient {
         if (cached != null) return Optional.of(cached);
 
         try {
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/v2/direction")
-                            .queryParam("origin", oLat + "," + oLng)
-                            .queryParam("destination", dLat + "," + dLng)
-                            .queryParam("vehicle", v)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = getMap("direction", "/v2/direction", b -> b
+                    .queryParam("origin", oLat + "," + oLng)
+                    .queryParam("destination", dLat + "," + dLng)
+                    .queryParam("vehicle", v)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return Optional.empty();
             List<Map<String, Object>> routes = (List<Map<String, Object>>) resp.get("routes");
@@ -230,17 +232,11 @@ public class GoongClient {
         String destsStr = destinations.stream().map(p -> p[0] + "," + p[1]).reduce((a, b) -> a + "|" + b).orElse("");
 
         try {
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/v2/distancematrix")
-                            .queryParam("origins", originsStr)
-                            .queryParam("destinations", destsStr)
-                            .queryParam("vehicle", v)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = getMap("distance matrix", "/v2/distancematrix", b -> b
+                    .queryParam("origins", originsStr)
+                    .queryParam("destinations", destsStr)
+                    .queryParam("vehicle", v)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return nullList(origins.size());
             List<Map<String, Object>> rows = (List<Map<String, Object>>) resp.get("rows");
@@ -272,15 +268,9 @@ public class GoongClient {
     @SuppressWarnings("unchecked")
     public Optional<String> reverseGeocodeProvince(double lat, double lng) {
         try {
-            Map<String, Object> resp = client.get()
-                    .uri(b -> b.path("/v2/geocode")
-                            .queryParam("latlng", lat + "," + lng)
-                            .queryParam("api_key", properties.getApiKey())
-                            .build())
-                    .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
-                    .block();
+            Map<String, Object> resp = getMap("reverse geocode", "/v2/geocode", b -> b
+                    .queryParam("latlng", lat + "," + lng)
+                    .queryParam("api_key", properties.getApiKey()));
 
             if (resp == null) return Optional.empty();
             List<Map<String, Object>> results = (List<Map<String, Object>>) resp.get("results");
@@ -323,6 +313,34 @@ public class GoongClient {
         List<TravelSegment> list = new java.util.ArrayList<>(size);
         for (int i = 0; i < size; i++) list.add(null);
         return list;
+    }
+
+    private Map<String, Object> getMap(String operation, String path, Consumer<UriBuilder> params) {
+        return providerResilience.execute(ProviderResilience.GOONG, () -> {
+            try {
+                return client.get()
+                        .uri(b -> {
+                            UriBuilder builder = b.path(path);
+                            params.accept(builder);
+                            return builder.build();
+                        })
+                        .retrieve()
+                        .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                        .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
+                        .block();
+            } catch (WebClientResponseException e) {
+                int status = e.getStatusCode().value();
+                if (status == 429 || status == 503) {
+                    providerResilience.honorRetryAfter(ProviderResilience.GOONG, e.getHeaders(),
+                            Duration.ofSeconds(60), "Goong " + operation + " HTTP " + status);
+                }
+                throw e;
+            }
+        }, () -> null);
+    }
+
+    private boolean isNotFoundStatus(String status) {
+        return "ZERO_RESULTS".equals(status) || "NOT_FOUND".equals(status);
     }
 
     @SuppressWarnings("unchecked")

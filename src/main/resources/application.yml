@@ -92,6 +92,22 @@ app:
     max-concurrent: 3
     # Số giờ bỏ qua một key sau khi phát hiện hết lượt (HTTP 401) trước khi thử lại — quota free reset theo tháng.
     exhausted-cooldown-hours: 6
+    # TTL cache âm cho query địa điểm thật sự không tìm thấy. Không áp dụng cho 429/timeout/5xx.
+    negative-cache-ttl-hours: 6
+  provider-resilience:
+    circuit-breaker-enabled: true
+    retry-after-default-seconds: 60
+    retry-after-max-seconds: 900
+    circuit-breaker:
+      sliding-window-size: 20
+      minimum-number-of-calls: 6
+      failure-rate-threshold: 50
+      slow-call-rate-threshold: 50
+      wait-duration-in-open-state-seconds: 30
+      permitted-number-of-calls-in-half-open-state: 2
+      goong-slow-call-seconds: 2
+      serp-api-slow-call-seconds: 6
+      llm-slow-call-seconds: 45
   scraper:
     # Fallback scrape Google Maps khi SerpApi hết quota. Sidecar Python chạy localhost trên VPS.
     # Bật khi sidecar đã deploy; tắt (false) → hệ thống về đúng hành vi Goong+SerpApi cũ.

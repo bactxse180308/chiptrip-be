@@ -2,6 +2,7 @@ package com.tranbac.chiptripbe.module.geocoding.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.config.SerpApiProperties;
+import com.tranbac.chiptripbe.common.resilience.ProviderResilience;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +41,7 @@ public class SerpApiClient {
     private final SerpApiProperties properties;
     private final ObjectMapper objectMapper;
     private final SerpApiKeyPool keyPool;
+    private final ProviderResilience providerResilience;
 
     private WebClient client;
 
@@ -77,6 +79,12 @@ public class SerpApiClient {
      * Lỗi HTTP khác 401 (429/5xx/timeout) để nguyên cho caller bắt (fail-soft về Goong).
      */
     private Map<String, Object> executeSearch(Consumer<UriBuilder> params, boolean throttle) {
+        return providerResilience.execute(ProviderResilience.SERPAPI,
+                () -> executeSearchInternal(params, throttle),
+                () -> null);
+    }
+
+    private Map<String, Object> executeSearchInternal(Consumer<UriBuilder> params, boolean throttle) {
         List<String> keys = keyPool.availableKeys();
         if (keys.isEmpty()) {
             log.warn("SerpApi: không còn key khả dụng (chưa cấu hình hoặc tất cả đang cooldown) — bỏ qua request");
@@ -110,9 +118,15 @@ public class SerpApiClient {
                     }
                     return resp;
                 } catch (WebClientResponseException e) {
-                    if (e.getStatusCode().value() == 401) {
+                    int status = e.getStatusCode().value();
+                    if (status == 401) {
                         keyPool.markExhausted(key);
                         // 401 = key sai hoặc hết lượt → thử key kế tiếp
+                    } else if (status == 429 || status == 503) {
+                        providerResilience.honorRetryAfter(ProviderResilience.SERPAPI, e.getHeaders(),
+                                Duration.ofSeconds(properties.getRetryBackoffMinutes() * 60L),
+                                "SerpApi HTTP " + status);
+                        throw e;
                     } else {
                         throw e; // 429/5xx... để caller fail-soft, đừng đốt thêm key
                     }
@@ -203,15 +217,22 @@ public class SerpApiClient {
             BigDecimal longitude
     ) {}
 
+    public record PlaceCandidateSearchResult(List<PlaceData> candidates, ProviderLookupStatus status) {}
+
     /**
      * Trả về danh sách ứng viên từ SerpApi (engine=google_maps).
      * Caller (PlaceEnrichmentService) sẽ chọn ứng viên khớp nhất theo address/title/location.
      */
     @SuppressWarnings("unchecked")
     public List<PlaceData> searchPlaceCandidates(String query) {
-        if (!properties.isEnabled()) return List.of();
-        if (!keyPool.hasKeys()) return List.of();
-        if (query == null || query.isBlank()) return List.of();
+        return searchPlaceCandidatesDetailed(query).candidates();
+    }
+
+    @SuppressWarnings("unchecked")
+    public PlaceCandidateSearchResult searchPlaceCandidatesDetailed(String query) {
+        if (!properties.isEnabled()) return new PlaceCandidateSearchResult(List.of(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
+        if (!keyPool.hasKeys()) return new PlaceCandidateSearchResult(List.of(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
+        if (query == null || query.isBlank()) return new PlaceCandidateSearchResult(List.of(), ProviderLookupStatus.NOT_FOUND);
 
         try {
             log.info("SerpApi searchPlaceCandidates (engine=google_maps) for query='{}'", query);
@@ -221,7 +242,7 @@ public class SerpApiClient {
                     .queryParam("q", query)
                     .queryParam("hl", "vi"));
 
-            if (resp == null) return List.of();
+            if (resp == null) return new PlaceCandidateSearchResult(List.of(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
 
             List<PlaceData> candidates = new ArrayList<>();
 
@@ -240,11 +261,13 @@ public class SerpApiClient {
                 }
             }
 
-            return candidates;
+            return candidates.isEmpty()
+                    ? new PlaceCandidateSearchResult(List.of(), ProviderLookupStatus.NOT_FOUND)
+                    : new PlaceCandidateSearchResult(candidates, ProviderLookupStatus.FOUND);
 
         } catch (Exception e) {
             log.warn("SerpApi search failed for query='{}': {}", query, e.getMessage());
-            return List.of();
+            return new PlaceCandidateSearchResult(List.of(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
         }
     }
 

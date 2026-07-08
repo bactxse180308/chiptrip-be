@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.util.PlaceQueryUtil;
 import com.tranbac.chiptripbe.module.geocoding.client.GoongClient;
 import com.tranbac.chiptripbe.module.geocoding.client.MapsScraperClient;
+import com.tranbac.chiptripbe.module.geocoding.client.ProviderLookupStatus;
 import com.tranbac.chiptripbe.module.geocoding.client.SerpApiClient;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
@@ -116,6 +117,10 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 log.debug("Place cache hit: name='{}', dest='{}'", normalized, normalizedDestination);
                 return fresh;
             }
+            if (placeCacheService.isFreshNotFound(normalized, normalizedDestination)) {
+                log.debug("Place negative-cache hit: name='{}', dest='{}'", normalized, normalizedDestination);
+                return Optional.empty();
+            }
         }
 
         if (pastDeadline(deadline)) return Optional.empty();
@@ -123,21 +128,30 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         // Hướng 2: POI cơ sở kinh doanh (nhà hàng/điểm tham quan) → SerpApi định danh chính xác hơn Goong.
         // Resolve qua SerpApi trước; nếu tìm được địa điểm thật (có GPS, khớp vùng) thì dùng luôn,
         // tránh việc Goong gom nhiều tên khác nhau về cùng 1 toạ độ vùng → trùng địa điểm.
+        SerpResolveResult serpFirstResult = null;
         if (preferSerpIdentity) {
-            Optional<PlaceCache> viaSerp = resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination,
+            serpFirstResult = resolvePlaceViaSerpApiDetailed(cleanedName, normalized, normalizedDestination,
                     destination, anchors, deadline, depth);
-            if (viaSerp.isPresent()) return viaSerp;
+            if (serpFirstResult.place().isPresent()) return serpFirstResult.place();
             if (pastDeadline(deadline)) return Optional.empty();
             log.debug("SerpApi-first miss cho '{}' — rơi về Goong", cleanedName);
         }
 
         // 2. Goong geocode — ưu tiên để có lat/lng chính xác; SerpApi là fallback
         String geocodeQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
-        Optional<GoongClient.GeocodeResult> geoOpt = goongClient.forwardGeocode(geocodeQuery);
+        GoongClient.GeocodeLookup geoLookup = goongClient.forwardGeocodeDetailed(geocodeQuery);
+        Optional<GoongClient.GeocodeResult> geoOpt = geoLookup.result();
         if (geoOpt.isEmpty()) {
             log.debug("Goong geocode: không tìm thấy '{}', thử SerpApi fallback", geocodeQuery);
-            return resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination, destination,
+            SerpResolveResult fallback = serpFirstResult != null
+                    ? serpFirstResult
+                    : resolvePlaceViaSerpApiDetailed(cleanedName, normalized, normalizedDestination, destination,
                     anchors, deadline, depth);
+            if (geoLookup.status() == ProviderLookupStatus.NOT_FOUND
+                    && fallback.status() == ProviderLookupStatus.NOT_FOUND) {
+                placeCacheService.saveNotFound(cleanedName, normalized, normalizedDestination, "goong-serpapi-not-found");
+            }
+            return fallback.place();
         }
 
         GoongClient.GeocodeResult geo = geoOpt.get();
@@ -148,8 +162,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                 normalizedDestination, anchors)) {
             log.warn("Goong mismatch: query='{}', address='{}', expectedDestination='{}' — thử SerpApi fallback",
                     geocodeQuery, geo.formattedAddress(), destination);
-            return resolvePlaceViaSerpApi(cleanedName, normalized, normalizedDestination, destination,
-                    anchors, deadline, depth);
+            return resolvePlaceViaSerpApiDetailed(cleanedName, normalized, normalizedDestination, destination,
+                    anchors, deadline, depth).place();
         }
 
         // 3. Dedup theo goongPlaceId (an toàn với duplicate trong DB).
@@ -324,6 +338,8 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
     /** Kết quả của 1 lần attempt SerpApi. */
     private record SerpEnrichOutcome(boolean enriched, LocalDateTime syncedAt) {}
 
+    private record SerpResolveResult(Optional<PlaceCache> place, ProviderLookupStatus status) {}
+
     /**
      * Gọi SerpApi, chọn candidate khớp nhất, set field enrich lên entity.
      * Tiêu chí "enriched" mới: hasBasic && hasPhotos && (hasOpeningHours || hasReviews).
@@ -345,7 +361,9 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             // AI đã được instruct để đưa city vào searchQuery, không append destination trip nữa
             // (tránh "Sân bay Nội Bài Hà Nội Đà Lạt Việt Nam" — SerpApi tìm nhầm thành phố)
             String serpQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
-            List<SerpApiClient.PlaceData> candidates = serpApiClient.searchPlaceCandidates(serpQuery);
+            SerpApiClient.PlaceCandidateSearchResult searchResult =
+                    serpApiClient.searchPlaceCandidatesDetailed(serpQuery);
+            List<SerpApiClient.PlaceData> candidates = searchResult.candidates();
             if (candidates.isEmpty()) {
                 log.debug("SerpApi không trả về candidate cho '{}' — thử scraper fallback (allowScraper={})", serpQuery, allowScraper);
                 return allowScraper ? enrichWithScraper(entity, cleanedName, deadline)
@@ -700,28 +718,32 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
      * (a) Goong không geocode được / trả sai vùng (fallback); (b) POI cơ sở kinh doanh cần
      * SerpApi định danh chính xác (preferSerpIdentity). Chỉ lưu nếu candidate có GPS và khớp vùng.
      */
-    private Optional<PlaceCache> resolvePlaceViaSerpApi(
+    private SerpResolveResult resolvePlaceViaSerpApiDetailed(
             String cleanedName, String normalized, String normalizedDestination, String destination,
             List<GeoAnchor> anchors, Instant deadline, EnrichmentDepth depth) {
 
-        if (pastDeadline(deadline)) return Optional.empty();
+        if (pastDeadline(deadline)) {
+            return new SerpResolveResult(Optional.empty(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
+        }
 
         String serpQuery = PlaceQueryUtil.buildPlaceQuery(cleanedName);
-        List<SerpApiClient.PlaceData> candidates = serpApiClient.searchPlaceCandidates(serpQuery);
+        SerpApiClient.PlaceCandidateSearchResult searchResult =
+                serpApiClient.searchPlaceCandidatesDetailed(serpQuery);
+        List<SerpApiClient.PlaceData> candidates = searchResult.candidates();
         if (candidates.isEmpty()) {
             log.debug("SerpApi fallback: không tìm thấy '{}'", serpQuery);
-            return Optional.empty();
+            return new SerpResolveResult(Optional.empty(), searchResult.status());
         }
 
         SerpApiClient.PlaceData best = pickBestCandidate(candidates, cleanedName, normalizedDestination, null, anchors);
         if (best == null) {
             log.warn("SerpApi fallback: không có candidate khớp destination='{}' cho query='{}'",
                     destination, serpQuery);
-            return Optional.empty();
+            return new SerpResolveResult(Optional.empty(), ProviderLookupStatus.NOT_FOUND);
         }
         if (best.latitude() == null || best.longitude() == null) {
             log.debug("SerpApi fallback: candidate '{}' không có GPS — bỏ qua", best.title());
-            return Optional.empty();
+            return new SerpResolveResult(Optional.empty(), ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
         }
 
         Optional<PlaceCache> existing = (normalizedDestination == null || normalizedDestination.isBlank())
@@ -803,12 +825,14 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         }
 
         try {
-            return Optional.of(placeCacheService.save(toSave));
+            return new SerpResolveResult(Optional.of(placeCacheService.save(toSave)), ProviderLookupStatus.FOUND);
         } catch (DataIntegrityViolationException ex) {
             log.warn("SerpApi fallback: duplicate on save for '{}' — refetching", normalized);
-            return (normalizedDestination == null || normalizedDestination.isBlank())
+            Optional<PlaceCache> refetched = (normalizedDestination == null || normalizedDestination.isBlank())
                     ? placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestinationIsNull(normalized)
                     : placeCacheRepository.findFirstByNormalizedNameAndNormalizedDestination(normalized, normalizedDestination);
+            return new SerpResolveResult(refetched,
+                    refetched.isPresent() ? ProviderLookupStatus.FOUND : ProviderLookupStatus.TEMPORARY_UNAVAILABLE);
         }
     }
 }
