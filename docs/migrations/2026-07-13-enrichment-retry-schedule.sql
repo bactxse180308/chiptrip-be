@@ -1,6 +1,16 @@
 -- Durable retry schedule for trip enrichment (SQL Server).
 -- Idempotent: safe to run again during deployment.
 
+-- Required by SQL Server when creating a filtered index.
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET QUOTED_IDENTIFIER ON;
+SET NUMERIC_ROUNDABORT OFF;
+GO
+
 IF COL_LENGTH('dbo.trips', 'enrichment_next_attempt_at') IS NULL
 BEGIN
     ALTER TABLE dbo.trips
