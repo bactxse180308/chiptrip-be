@@ -10,8 +10,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Pool key SerpApi hỗ trợ xoay vòng: tự bỏ qua key đã hết lượt (HTTP 401 hoặc body
- * báo "out of searches") và thử lại sau cooldown.
+ * Pool key SerpApi hỗ trợ xoay vòng: HTTP 401 bị loại tạm theo cooldown; key có body báo hết
+ * quota searches bị loại trong vòng đời process hiện tại để không lặp lại 429 vô ích.
  *
  * Key khai báo trong biến SERPAPI_API_KEY, nhiều key ngăn cách bằng dấu phẩy.
  * Trạng thái exhausted lưu in-memory (ConcurrentHashMap) → reset khi restart app.
@@ -81,6 +81,12 @@ public class SerpApiKeyPool {
         exhaustedUntil.put(key, System.currentTimeMillis() + cooldownMs);
         log.warn("SerpApi: key ...{} bị đánh dấu hết lượt, bỏ qua {} giờ tới",
                 tail(key), cooldownMs / MS_PER_HOUR);
+    }
+
+    /** Quota searches của account đã hết: không thử lại key này trong vòng đời process hiện tại. */
+    void markQuotaExhausted(String key) {
+        exhaustedUntil.put(key, Long.MAX_VALUE);
+        log.warn("SerpApi: key ...{} đã hết quota searches, bỏ qua đến khi app restart", tail(key));
     }
 
     /** Chỉ lộ 4 ký tự cuối để tránh log lộ API key. */

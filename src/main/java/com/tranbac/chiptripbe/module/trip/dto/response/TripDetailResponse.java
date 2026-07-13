@@ -37,7 +37,8 @@ public class TripDetailResponse {
 
     /**
      * true khi còn địa điểm (ngày 2..N) đang được enrich FULL ở luồng nền — FE dùng để poll
-     * lại GET /trips/{id} cho tới khi ảnh/review nảy ra đủ. Tự về false khi enrich nền xong/thất bại.
+     * lại GET /trips/{id} cho tới khi ảnh/review nảy ra đủ. Lỗi tạm thời giữ true và được scheduler
+     * retry theo cooldown/backoff; chỉ về false khi các địa điểm đã xử lý xong.
      */
     private boolean enriching;
 

@@ -3,6 +3,7 @@ package com.tranbac.chiptripbe.module.trip.service.impl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.enums.ActivityType;
 import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.common.resilience.ProviderResilience;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
@@ -31,12 +32,15 @@ import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 
+import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -47,6 +51,7 @@ import java.util.concurrent.Executor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -87,6 +92,7 @@ class TripServiceImplTest {
     @Mock private ObjectMapper objectMapper;
     @Mock private PlaceEnrichmentService placeEnrichmentService;
     @Mock private PlaceCacheRepository placeCacheRepository;
+    @Mock private ProviderResilience providerResilience;
     @Mock private TripGenerationPersistenceService tripGenerationPersistenceService;
     @Mock private SimpMessagingTemplate messagingTemplate;
     @Mock private Executor enrichmentExecutor;
@@ -112,6 +118,7 @@ class TripServiceImplTest {
                 objectMapper,
                 placeEnrichmentService,
                 placeCacheRepository,
+                providerResilience,
                 tripGenerationPersistenceService,
                 messagingTemplate,
                 enrichmentExecutor,
@@ -124,6 +131,12 @@ class TripServiceImplTest {
             ((Runnable) inv.getArgument(0)).run();
             return null;
         }).when(backgroundEnrichmentExecutor).execute(any(Runnable.class));
+        when(providerResilience.cooldownRemaining(any(String[].class))).thenReturn(Duration.ZERO);
+        when(tripRepository.tryClaimEnrichment(
+                anyLong(), any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(1);
+        when(activityRepository.updateResolvedPlaceIfQueryUnchanged(
+                anyLong(), anyString(), anyLong(), any(), any(), any(), any(), anyString()))
+                .thenReturn(1);
     }
 
     @Test
@@ -299,12 +312,201 @@ class TripServiceImplTest {
     }
 
     @Test
+    void generateTrip_backgroundStillIncompleteKeepsEnrichmentPending() {
+        LocalDate start = LocalDate.now(VN);
+        String query = "day-1-food";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Day 1 food", "FOOD", query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(false)));
+        whenBackgroundResolve(query).thenReturn(Optional.of(cache(false)));
+        LocalDateTime before = LocalDateTime.now();
+
+        service.generateTrip(USER_ID, req);
+
+        verify(tripRepository, never()).markEnrichmentDone(99L);
+        ArgumentCaptor<LocalDateTime> retryAt = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tripRepository).scheduleEnrichmentRetry(eq(99L), retryAt.capture());
+        assertTrue(retryAt.getValue().isAfter(before.plusMinutes(4)));
+        assertTrue(retryAt.getValue().isBefore(LocalDateTime.now().plusMinutes(6)));
+        verify(messagingTemplate, never()).convertAndSendToUser(
+                "1", "/queue/trip-enrichment", TripEnrichmentResultDto.done(99L));
+    }
+
+    @Test
+    void generateTrip_delayedBackgroundUsesPersistedAttemptsForBackoff() {
+        LocalDate start = LocalDate.now(VN);
+        String query = "delayed-background-place";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Delayed background place", "FOOD", query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(false)));
+        whenBackgroundResolve(query).thenReturn(Optional.of(cache(false)));
+        when(tripRepository.findEnrichmentAttemptsById(99L)).thenReturn(Optional.of(5));
+        LocalDateTime before = LocalDateTime.now();
+
+        service.generateTrip(USER_ID, req);
+
+        ArgumentCaptor<LocalDateTime> retryAt = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tripRepository).scheduleEnrichmentRetry(eq(99L), retryAt.capture());
+        assertTrue(retryAt.getValue().isAfter(before.plusMinutes(59)));
+        assertTrue(retryAt.getValue().isBefore(LocalDateTime.now().plusMinutes(61)));
+    }
+
+    @Test
+    void generateTrip_activeProviderCooldownDefersWithoutBackgroundAttempt() {
+        LocalDate start = LocalDate.now(VN);
+        String query = "day-1-food";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Day 1 food", "FOOD", query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(false)));
+        when(providerResilience.cooldownRemaining(any(String[].class)))
+                .thenReturn(Duration.ofMinutes(20));
+        LocalDateTime before = LocalDateTime.now();
+
+        service.generateTrip(USER_ID, req);
+
+        ArgumentCaptor<LocalDateTime> retryAt = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tripRepository).deferEnrichmentRetry(eq(99L), retryAt.capture());
+        assertTrue(retryAt.getValue().isAfter(before.plusMinutes(19)));
+        assertTrue(retryAt.getValue().isBefore(LocalDateTime.now().plusMinutes(21)));
+        verify(tripRepository, never()).scheduleEnrichmentRetry(anyLong(), any(LocalDateTime.class));
+        verify(placeEnrichmentService, never()).resolvePlace(
+                eq(query), anyString(), anyList(), isNull(), anyBoolean(),
+                eq(PlaceEnrichmentService.EnrichmentDepth.FULL), anyBoolean());
+        verify(tripRepository, never()).markEnrichmentDone(99L);
+    }
+
+    @Test
+    void generateTrip_backgroundClaimRejectedDoesNotRunStaleJob() {
+        LocalDate start = LocalDate.now(VN);
+        String query = "stale-background-place";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Stale background place", "FOOD", query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.of(cache(false)));
+        when(tripRepository.tryClaimEnrichment(eq(99L),
+                any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(0);
+
+        service.generateTrip(USER_ID, req);
+
+        verify(placeEnrichmentService, never()).resolvePlace(
+                eq(query), anyString(), anyList(), isNull(), anyBoolean(),
+                eq(PlaceEnrichmentService.EnrichmentDepth.FULL), anyBoolean());
+        verify(tripRepository, never()).deferEnrichmentRetry(anyLong(), any(LocalDateTime.class));
+        verify(tripRepository, never()).scheduleEnrichmentRetry(anyLong(), any(LocalDateTime.class));
+        verify(tripRepository, never()).markEnrichmentDone(anyLong());
+    }
+
+    @Test
+    void generateTrip_backgroundResolveLinksPreviouslyUnresolvedActivityBeforeDone() {
+        LocalDate start = LocalDate.now(VN);
+        String query = "unresolved-place";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Unresolved place", "FOOD", query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.empty());
+
+        Activity persistedActivity = Activity.builder()
+                .type(ActivityType.FOOD)
+                .searchQuery(query)
+                .build();
+        persistedActivity.setId(31L);
+        when(activityRepository.findByDayTripIdOrderByDayDayNumberAscDisplayOrderAsc(99L))
+                .thenReturn(List.of(persistedActivity));
+        PlaceCache resolved = cache(true);
+        resolved.setId(17L);
+        resolved.setLatitude(BigDecimal.valueOf(10.77));
+        resolved.setLongitude(BigDecimal.valueOf(106.69));
+        resolved.setGoongPlaceId("goong-17");
+        resolved.setAddress("Resolved address");
+        whenBackgroundResolve(query).thenReturn(Optional.of(resolved));
+
+        service.generateTrip(USER_ID, req);
+
+        verify(activityRepository).updateResolvedPlaceIfQueryUnchanged(
+                31L, query, 17L,
+                resolved.getLatitude(), resolved.getLongitude(),
+                "goong-17", "Resolved address", "goong");
+        verify(tripRepository).markEnrichmentDone(99L);
+    }
+
+    @Test
+    void generateTrip_concurrentSearchQueryEditKeepsEnrichmentPending() {
+        LocalDate start = LocalDate.now(VN);
+        String query = "place-edited-while-enriching";
+        GenerateTripRequest req = request(start, start, List.of("food_tour"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Concurrent edit", "FOOD", query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.empty());
+
+        Activity persistedActivity = Activity.builder().type(ActivityType.FOOD).searchQuery(query).build();
+        persistedActivity.setId(37L);
+        when(activityRepository.findByDayTripIdOrderByDayDayNumberAscDisplayOrderAsc(99L))
+                .thenReturn(List.of(persistedActivity));
+        PlaceCache resolved = cache(true);
+        resolved.setId(20L);
+        whenBackgroundResolve(query).thenReturn(Optional.of(resolved));
+        when(activityRepository.updateResolvedPlaceIfQueryUnchanged(
+                eq(37L), eq(query), eq(20L), any(), any(), any(), any(), anyString()))
+                .thenReturn(0);
+
+        service.generateTrip(USER_ID, req);
+
+        verify(tripRepository, never()).markEnrichmentDone(99L);
+        verify(tripRepository).scheduleEnrichmentRetry(eq(99L), any(LocalDateTime.class));
+    }
+
+    @Test
+    void generateTrip_backgroundResolveRetriesAccommodationDetailsBeforeDone() {
+        LocalDate start = LocalDate.now(VN);
+        String query = "unresolved-hotel";
+        GenerateTripRequest req = request(start, start, List.of("relax"));
+        AiItineraryResult itinerary = itinerary(start,
+                List.of(activity("Unresolved hotel", "ACCOMMODATION", query)));
+        stubSuccessfulGenerate(req, itinerary);
+        whenForegroundResolve(query, PlaceEnrichmentService.EnrichmentDepth.FULL)
+                .thenReturn(Optional.empty());
+
+        Activity persistedActivity = Activity.builder()
+                .type(ActivityType.ACCOMMODATION)
+                .searchQuery(query)
+                .build();
+        persistedActivity.setId(32L);
+        when(activityRepository.findByDayTripIdOrderByDayDayNumberAscDisplayOrderAsc(99L))
+                .thenReturn(List.of(persistedActivity));
+        PlaceCache resolved = cache(true);
+        resolved.setId(18L);
+        whenBackgroundResolve(query).thenReturn(Optional.of(resolved));
+
+        service.generateTrip(USER_ID, req);
+
+        verify(placeEnrichmentService).enrichAccommodation(
+                resolved, start, start.plusDays(1), 2, null);
+        verify(tripRepository).markEnrichmentDone(99L);
+    }
+
+    @Test
     void sweepPendingEnrichments_reEnrichesNotFullPlaceThenMarksDone() {
         // P1 durable: trip còn pending → sweeper reconstruct từ DB, enrich lại thành công → tắt cờ.
         User owner = normalUser();
         Trip trip = Trip.builder().user(owner).destination("Đà Lạt").enrichmentPending(true).build();
         trip.setId(77L);
-        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class), eq(3), any()))
+        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class),
+                any(LocalDateTime.class), any()))
                 .thenReturn(List.of(trip));
 
         TripDay day = TripDay.builder().dayNumber(1).build();
@@ -316,20 +518,162 @@ class TripServiceImplTest {
                 .searchQuery("Cafe Tùng Đà Lạt")
                 .placeCacheId(7L)
                 .build();
+        act.setId(33L);
         when(activityRepository.findByDayIdOrderByDisplayOrder(11L)).thenReturn(List.of(act));
 
         PlaceCache basic = cache(false);   // BASIC/serp-miss → cần enrich lại
         basic.setId(7L);
         when(placeCacheRepository.findAllById(anyList())).thenReturn(List.of(basic));
         when(placeEnrichmentService.canonicalKey("Cafe Tùng Đà Lạt")).thenReturn("cafe tung da lat");
-        whenBackgroundResolve("Cafe Tùng Đà Lạt").thenReturn(Optional.of(cache(true)));
+        PlaceCache enriched = cache(true);
+        enriched.setId(7L);
+        whenBackgroundResolve("Cafe Tùng Đà Lạt").thenReturn(Optional.of(enriched));
 
         service.sweepPendingEnrichments();
 
         verify(tripRepository).markEnrichmentDone(77L);
         verify(messagingTemplate).convertAndSendToUser(
                 "1", "/queue/trip-enrichment", TripEnrichmentResultDto.done(77L));
-        verify(tripRepository, never()).incrementEnrichmentAttempts(anyLong());
+        verify(tripRepository, never()).scheduleEnrichmentRetry(anyLong(), any(LocalDateTime.class));
+    }
+
+    @Test
+    void sweepPendingEnrichments_activeProviderCooldownDefersWithoutConsumingAttempt() {
+        User owner = normalUser();
+        Trip trip = Trip.builder().user(owner).destination("Da Lat").enrichmentPending(true).build();
+        trip.setId(78L);
+        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class),
+                any(LocalDateTime.class), any())).thenReturn(List.of(trip));
+        when(providerResilience.cooldownRemaining(any(String[].class)))
+                .thenReturn(Duration.ofSeconds(90));
+        LocalDateTime before = LocalDateTime.now();
+
+        service.sweepPendingEnrichments();
+
+        ArgumentCaptor<LocalDateTime> retryAt = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tripRepository).deferEnrichmentRetry(eq(78L), retryAt.capture());
+        assertTrue(retryAt.getValue().isAfter(before.plusSeconds(89)));
+        assertTrue(retryAt.getValue().isBefore(LocalDateTime.now().plusSeconds(91)));
+        verify(tripDayRepository, never()).findByTripIdOrderByDayNumber(78L);
+        verify(tripRepository, never()).scheduleEnrichmentRetry(anyLong(), any(LocalDateTime.class));
+        verify(tripRepository, never()).markEnrichmentDone(anyLong());
+    }
+
+    @Test
+    void sweepPendingEnrichments_claimRejectedSkipsStaleSelection() {
+        User owner = normalUser();
+        Trip trip = Trip.builder().user(owner).destination("Da Lat").enrichmentPending(true).build();
+        trip.setId(81L);
+        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class),
+                any(LocalDateTime.class), any())).thenReturn(List.of(trip));
+        when(tripRepository.tryClaimEnrichment(eq(81L),
+                any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(0);
+
+        service.sweepPendingEnrichments();
+
+        verify(tripDayRepository, never()).findByTripIdOrderByDayNumber(81L);
+        verify(tripRepository, never()).deferEnrichmentRetry(anyLong(), any(LocalDateTime.class));
+        verify(tripRepository, never()).scheduleEnrichmentRetry(anyLong(), any(LocalDateTime.class));
+        verify(tripRepository, never()).markEnrichmentDone(anyLong());
+    }
+
+    @Test
+    void sweepPendingEnrichments_incompleteSecondAttemptSchedulesTenMinuteBackoff() {
+        stubIncompletePendingTrip(79L, 1, 12L, 34L, 8L, "Retry place");
+        LocalDateTime before = LocalDateTime.now();
+
+        service.sweepPendingEnrichments();
+
+        ArgumentCaptor<LocalDateTime> retryAt = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tripRepository).scheduleEnrichmentRetry(eq(79L), retryAt.capture());
+        assertTrue(retryAt.getValue().isAfter(before.plusMinutes(9)));
+        assertTrue(retryAt.getValue().isBefore(LocalDateTime.now().plusMinutes(11)));
+        verify(tripRepository, never()).markEnrichmentDone(79L);
+    }
+
+    @Test
+    void sweepPendingEnrichments_manyFailuresCapsBackoffAtSixtyMinutes() {
+        stubIncompletePendingTrip(82L, 5, 14L, 35L, 9L, "Long retry place");
+        LocalDateTime before = LocalDateTime.now();
+
+        service.sweepPendingEnrichments();
+
+        ArgumentCaptor<LocalDateTime> retryAt = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tripRepository).scheduleEnrichmentRetry(eq(82L), retryAt.capture());
+        assertTrue(retryAt.getValue().isAfter(before.plusMinutes(59)));
+        assertTrue(retryAt.getValue().isBefore(LocalDateTime.now().plusMinutes(61)));
+        verify(tripRepository, never()).markEnrichmentDone(82L);
+    }
+
+    @Test
+    void sweepPendingEnrichments_resolvesAndLinksActivityWithoutPlaceCache() {
+        User owner = normalUser();
+        Trip trip = Trip.builder().user(owner).destination("Da Lat").enrichmentPending(true).build();
+        trip.setId(80L);
+        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class),
+                any(LocalDateTime.class), any())).thenReturn(List.of(trip));
+
+        TripDay day = TripDay.builder().dayNumber(1).build();
+        day.setId(13L);
+        when(tripDayRepository.findByTripIdOrderByDayNumber(80L)).thenReturn(List.of(day));
+        Activity activity = Activity.builder()
+                .type(ActivityType.ATTRACTION)
+                .searchQuery("Missing coordinate")
+                .build();
+        activity.setId(32L);
+        when(activityRepository.findByDayIdOrderByDisplayOrder(13L)).thenReturn(List.of(activity));
+        when(placeEnrichmentService.canonicalKey("Missing coordinate"))
+                .thenReturn("missing coordinate");
+        PlaceCache resolved = cache(true);
+        resolved.setId(18L);
+        resolved.setLatitude(BigDecimal.valueOf(11.94));
+        resolved.setLongitude(BigDecimal.valueOf(108.45));
+        resolved.setAddress("Da Lat address");
+        whenBackgroundResolve("Missing coordinate").thenReturn(Optional.of(resolved));
+
+        service.sweepPendingEnrichments();
+
+        verify(activityRepository).updateResolvedPlaceIfQueryUnchanged(
+                32L, "Missing coordinate", 18L,
+                resolved.getLatitude(), resolved.getLongitude(),
+                null, "Da Lat address", "serpapi");
+        verify(tripRepository).markEnrichmentDone(80L);
+    }
+
+    @Test
+    void sweepPendingEnrichments_retriesAccommodationWithPersistedDateRange() {
+        LocalDate stayDate = LocalDate.now(VN).plusDays(2);
+        Trip trip = Trip.builder()
+                .user(normalUser())
+                .destination("Da Lat")
+                .dateStart(stayDate)
+                .dateEnd(stayDate.plusDays(1))
+                .peopleCount(3)
+                .enrichmentPending(true)
+                .build();
+        trip.setId(83L);
+        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class),
+                any(LocalDateTime.class), any())).thenReturn(List.of(trip));
+
+        TripDay day = TripDay.builder().dayNumber(1).date(stayDate).build();
+        day.setId(15L);
+        when(tripDayRepository.findByTripIdOrderByDayNumber(83L)).thenReturn(List.of(day));
+        Activity activity = Activity.builder()
+                .type(ActivityType.ACCOMMODATION)
+                .searchQuery("Retry hotel")
+                .build();
+        activity.setId(36L);
+        when(activityRepository.findByDayIdOrderByDisplayOrder(15L)).thenReturn(List.of(activity));
+        when(placeEnrichmentService.canonicalKey("Retry hotel")).thenReturn("retry hotel");
+        PlaceCache resolved = cache(true);
+        resolved.setId(19L);
+        whenBackgroundResolve("Retry hotel").thenReturn(Optional.of(resolved));
+
+        service.sweepPendingEnrichments();
+
+        verify(placeEnrichmentService).enrichAccommodation(
+                resolved, stayDate, stayDate.plusDays(1), 3, null);
+        verify(tripRepository).markEnrichmentDone(83L);
     }
 
     @Test
@@ -394,6 +738,37 @@ class TripServiceImplTest {
         when(req.getPeopleCount()).thenReturn(2);
         when(req.getBudgetVnd()).thenReturn(5_000_000L);
         return req;
+    }
+
+    private void stubIncompletePendingTrip(Long tripId, int attempts, Long dayId,
+                                           Long activityId, Long cacheId, String query) {
+        Trip trip = Trip.builder()
+                .user(normalUser())
+                .destination("Da Lat")
+                .enrichmentPending(true)
+                .enrichmentAttempts(attempts)
+                .build();
+        trip.setId(tripId);
+        when(tripRepository.findPendingEnrichment(any(LocalDateTime.class),
+                any(LocalDateTime.class), any())).thenReturn(List.of(trip));
+
+        TripDay day = TripDay.builder().dayNumber(1).build();
+        day.setId(dayId);
+        when(tripDayRepository.findByTripIdOrderByDayNumber(tripId)).thenReturn(List.of(day));
+        Activity activity = Activity.builder()
+                .type(ActivityType.FOOD)
+                .searchQuery(query)
+                .placeCacheId(cacheId)
+                .build();
+        activity.setId(activityId);
+        when(activityRepository.findByDayIdOrderByDisplayOrder(dayId)).thenReturn(List.of(activity));
+        PlaceCache basic = cache(false);
+        basic.setId(cacheId);
+        when(placeCacheRepository.findAllById(anyList())).thenReturn(List.of(basic));
+        when(placeEnrichmentService.canonicalKey(query)).thenReturn(query.toLowerCase());
+        PlaceCache incomplete = cache(false);
+        incomplete.setId(cacheId);
+        whenBackgroundResolve(query).thenReturn(Optional.of(incomplete));
     }
 
     private void stubSuccessfulGenerate(GenerateTripRequest req, AiItineraryResult itinerary) {

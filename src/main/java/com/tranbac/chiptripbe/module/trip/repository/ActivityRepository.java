@@ -4,8 +4,12 @@ import com.tranbac.chiptripbe.module.trip.entity.Activity;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
@@ -21,6 +25,22 @@ public interface ActivityRepository extends JpaRepository<Activity, Long> {
 
     @Query("SELECT a FROM Activity a JOIN FETCH a.day d WHERE d.trip.id = :tripId ORDER BY d.dayNumber, a.displayOrder")
     List<Activity> findByTripIdWithDayOrderByDayAndOrder(@Param("tripId") Long tripId);
+
+    /** Chỉ cập nhật các cột định vị, tránh merge entity cũ sau khi chờ external API. */
+    @Modifying
+    @Transactional
+    @Query("UPDATE Activity a SET a.placeCacheId = :placeCacheId, a.latitude = :latitude, " +
+           "a.longitude = :longitude, a.placeId = :placeId, a.formattedAddress = :formattedAddress, " +
+           "a.geocodingProvider = :geocodingProvider " +
+           "WHERE a.id = :activityId AND a.searchQuery = :expectedSearchQuery")
+    int updateResolvedPlaceIfQueryUnchanged(@Param("activityId") Long activityId,
+                                            @Param("expectedSearchQuery") String expectedSearchQuery,
+                                            @Param("placeCacheId") Long placeCacheId,
+                                            @Param("latitude") BigDecimal latitude,
+                                            @Param("longitude") BigDecimal longitude,
+                                            @Param("placeId") String placeId,
+                                            @Param("formattedAddress") String formattedAddress,
+                                            @Param("geocodingProvider") String geocodingProvider);
 
     /**
      * Returns [[tripId, imageUrl]] for the first non-null image per trip, given a list of trip IDs.

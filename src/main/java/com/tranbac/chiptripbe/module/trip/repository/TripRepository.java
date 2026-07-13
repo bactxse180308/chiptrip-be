@@ -64,23 +64,47 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
 
     /**
      * Durable enrich sweeper: trip còn enrichmentPending, đã tạo đủ lâu (job nền in-memory lẽ ra
-     * xong hoặc đã chết), chưa vượt trần số lần thử. ORDER BY createdAt → xử lý chuyến cũ trước.
+     * xong hoặc đã chết), và đã đến mốc retry tiếp theo. ORDER BY createdAt → xử lý chuyến cũ trước.
      */
     @Query("SELECT t FROM Trip t JOIN FETCH t.user WHERE t.enrichmentPending = true " +
-           "AND t.createdAt < :createdBefore AND t.enrichmentAttempts < :maxAttempts " +
+           "AND t.createdAt < :createdBefore " +
+           "AND (t.enrichmentNextAttemptAt IS NULL OR t.enrichmentNextAttemptAt <= :now) " +
            "ORDER BY t.createdAt ASC")
     List<Trip> findPendingEnrichment(@Param("createdBefore") LocalDateTime createdBefore,
-                                     @Param("maxAttempts") int maxAttempts, Pageable pageable);
+                                     @Param("now") LocalDateTime now, Pageable pageable);
 
     @Modifying
     @Transactional
-    @Query("UPDATE Trip t SET t.enrichmentPending = false WHERE t.id = :tripId")
+    @Query("UPDATE Trip t SET t.enrichmentPending = false, t.enrichmentNextAttemptAt = null WHERE t.id = :tripId")
     void markEnrichmentDone(@Param("tripId") Long tripId);
 
+    /** Claim nguyên tử trước external calls; chỉ một background/sweeper worker nhận được row. */
     @Modifying
     @Transactional
-    @Query("UPDATE Trip t SET t.enrichmentAttempts = t.enrichmentAttempts + 1 WHERE t.id = :tripId")
-    void incrementEnrichmentAttempts(@Param("tripId") Long tripId);
+    @Query("UPDATE Trip t SET t.enrichmentNextAttemptAt = :leaseUntil " +
+           "WHERE t.id = :tripId AND t.enrichmentPending = true " +
+           "AND (t.enrichmentNextAttemptAt IS NULL OR t.enrichmentNextAttemptAt <= :now)")
+    int tryClaimEnrichment(@Param("tripId") Long tripId,
+                           @Param("now") LocalDateTime now,
+                           @Param("leaseUntil") LocalDateTime leaseUntil);
+
+    @Query("SELECT t.enrichmentAttempts FROM Trip t WHERE t.id = :tripId")
+    Optional<Integer> findEnrichmentAttemptsById(@Param("tripId") Long tripId);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Trip t SET t.enrichmentAttempts = t.enrichmentAttempts + 1, " +
+           "t.enrichmentNextAttemptAt = :nextAttemptAt " +
+           "WHERE t.id = :tripId AND t.enrichmentPending = true")
+    void scheduleEnrichmentRetry(@Param("tripId") Long tripId,
+                                 @Param("nextAttemptAt") LocalDateTime nextAttemptAt);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Trip t SET t.enrichmentNextAttemptAt = :nextAttemptAt " +
+           "WHERE t.id = :tripId AND t.enrichmentPending = true")
+    void deferEnrichmentRetry(@Param("tripId") Long tripId,
+                              @Param("nextAttemptAt") LocalDateTime nextAttemptAt);
 
     @Query("SELECT YEAR(t.createdAt), MONTH(t.createdAt), DAY(t.createdAt), COUNT(t) " +
            "FROM Trip t WHERE t.createdAt >= :from AND t.createdAt <= :to " +

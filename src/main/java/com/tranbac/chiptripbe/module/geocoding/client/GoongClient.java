@@ -28,15 +28,20 @@ import java.util.function.Consumer;
 @RequiredArgsConstructor
 public class GoongClient {
 
+    private static final Duration RATE_LIMIT_MAX_WAIT = Duration.ofSeconds(1);
+
     private final WebClient.Builder webClientBuilder;
     private final GoongProperties properties;
     private final ProviderResilience providerResilience;
 
     private WebClient client;
 
+    private GoongRateLimiter rateLimiter;
+
     @PostConstruct
     void init() {
         client = webClientBuilder.baseUrl(properties.getBaseUrl()).build();
+        rateLimiter = new GoongRateLimiter(properties.getRequestsPerSecond());
     }
 
     /**
@@ -316,7 +321,15 @@ public class GoongClient {
     }
 
     private Map<String, Object> getMap(String operation, String path, Consumer<UriBuilder> params) {
-        return providerResilience.execute(ProviderResilience.GOONG, () -> {
+        String resilienceProvider = resilienceProviderFor(operation);
+        return providerResilience.executeWithAdmission(resilienceProvider, () -> {
+            boolean acquired = rateLimiter.acquire(RATE_LIMIT_MAX_WAIT);
+            if (!acquired) {
+                log.debug("Goong {} skipped: rate-limit queue exceeded {} ms",
+                        operation, RATE_LIMIT_MAX_WAIT.toMillis());
+            }
+            return acquired;
+        }, () -> {
             try {
                 return client.get()
                         .uri(b -> {
@@ -326,17 +339,27 @@ public class GoongClient {
                         })
                         .retrieve()
                         .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                        .doOnSubscribe(ignored -> log.debug(
+                                "Goong outbound request operation={}", operation))
                         .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
                         .block();
             } catch (WebClientResponseException e) {
                 int status = e.getStatusCode().value();
                 if (status == 429 || status == 503) {
-                    providerResilience.honorRetryAfter(ProviderResilience.GOONG, e.getHeaders(),
+                    providerResilience.honorRetryAfter(resilienceProvider, e.getHeaders(),
                             Duration.ofSeconds(60), "Goong " + operation + " HTTP " + status);
                 }
                 throw e;
             }
         }, () -> null);
+    }
+
+    static String resilienceProviderFor(String operation) {
+        return switch (operation) {
+            case "direction", "distance matrix" -> ProviderResilience.GOONG_ROUTE;
+            case "autocomplete", "place detail" -> ProviderResilience.GOONG_AUTOCOMPLETE;
+            default -> ProviderResilience.GOONG_GEOCODE;
+        };
     }
 
     private boolean isNotFoundStatus(String status) {

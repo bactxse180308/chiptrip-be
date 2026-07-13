@@ -105,10 +105,14 @@ public class Trip extends BaseAuditEntity {
     @Builder.Default
     private boolean enrichmentPending = false;
 
-    /** Số lần sweeper đã thử enrich lại — trần chống loop vô hạn cho địa điểm không bao giờ có data. */
+    /** Số lần enrich thực đã thất bại; dùng để tính exponential backoff 5→10→20→40→60 phút. */
     @Column(name = "enrichment_attempts", columnDefinition = "INT NOT NULL DEFAULT 0")
     @Builder.Default
     private Integer enrichmentAttempts = 0;
+
+    /** Mốc sớm nhất sweeper được thử lại; null nghĩa là có thể xử lý ngay sau grace period. */
+    @Column(name = "enrichment_next_attempt_at", columnDefinition = "DATETIME2")
+    private LocalDateTime enrichmentNextAttemptAt;
 
     @OneToMany(mappedBy = "trip", cascade = CascadeType.ALL,
             orphanRemoval = true, fetch = FetchType.LAZY)

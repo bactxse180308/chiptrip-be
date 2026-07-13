@@ -8,14 +8,14 @@ import org.springframework.stereotype.Component;
 
 /**
  * Durable safety-net cho enrich nền (P1). Enrich FULL ngày 2..N vốn submit vào executor in-memory
- * (best-effort) → mất khi app restart / queue DiscardPolicy / provider down lâu hơn retry ngắn.
+ * (best-effort) → mất khi app restart / queue DiscardPolicy / provider down kéo dài.
  *
  * Scheduler này quét định kỳ các trip còn {@code enrichmentPending} và enrich lại từ trạng thái DB,
- * tắt cờ khi xong hoặc hết số lần thử. Nhờ vậy cờ {@code enriching} (FE dựa vào để poll) luôn tiến
- * tới false, và ảnh/review vẫn "nảy" ra dù job nền ban đầu đã chết.
+ * chỉ tắt cờ khi xong. Lỗi tạm thời được hẹn lại theo cooldown/exponential backoff, nên cờ
+ * {@code enriching} không báo hoàn tất giả khi địa điểm vẫn chưa được xử lý.
  *
- * MVP 1 instance: chưa cần ShedLock (giống PostTripScheduler / TripReminderScheduler). Nhiều instance
- * cần khóa phân tán để 2 instance không cùng sweep 1 trip.
+ * Mỗi trip được claim nguyên tử tại DB trước external call nên nhiều worker không xử lý trùng row.
+ * Nếu scale nhiều backend, Goong limiter vẫn cần chuyển sang limiter phân tán để giữ tổng rate/IP.
  */
 @Slf4j
 @Component

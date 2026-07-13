@@ -15,7 +15,9 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 @Slf4j
@@ -24,6 +26,9 @@ import java.util.function.Supplier;
 public class ProviderResilience {
 
     public static final String GOONG = "goong";
+    public static final String GOONG_GEOCODE = "goong-geocode";
+    public static final String GOONG_ROUTE = "goong-route";
+    public static final String GOONG_AUTOCOMPLETE = "goong-autocomplete";
     public static final String SERPAPI = "serpapi";
     public static final String LLM = "llm";
 
@@ -50,6 +55,51 @@ public class ProviderResilience {
         }
     }
 
+    /**
+     * Variant có admission gate (ví dụ rate limiter). Circuit breaker cấp quyền trước để OPEN
+     * fast-fail mà không chiếm permit chung; thời gian chờ gate không bị tính là độ trễ provider.
+     */
+    public <T> T executeWithAdmission(String provider, BooleanSupplier admission,
+                                      Supplier<T> supplier, Supplier<T> fallback) {
+        ProviderState state = state(provider);
+        long now = System.currentTimeMillis();
+        if (state.cooldownUntilMs().get() > now) return fallback.get();
+
+        if (!properties.isCircuitBreakerEnabled()) {
+            if (!admission.getAsBoolean()) return fallback.get();
+            if (state.cooldownUntilMs().get() > System.currentTimeMillis()) return fallback.get();
+            return supplier.get();
+        }
+
+        CircuitBreaker circuitBreaker = state.circuitBreaker();
+        if (!circuitBreaker.tryAcquirePermission()) {
+            log.warn("{} circuit breaker OPEN, using fallback", provider);
+            return fallback.get();
+        }
+
+        boolean admitted;
+        try {
+            admitted = admission.getAsBoolean();
+        } catch (RuntimeException | Error e) {
+            circuitBreaker.releasePermission();
+            throw e;
+        }
+        if (!admitted || state.cooldownUntilMs().get() > System.currentTimeMillis()) {
+            circuitBreaker.releasePermission();
+            return fallback.get();
+        }
+
+        long startedAt = System.nanoTime();
+        try {
+            T result = supplier.get();
+            circuitBreaker.onSuccess(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS);
+            return result;
+        } catch (RuntimeException | Error e) {
+            circuitBreaker.onError(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS, e);
+            throw e;
+        }
+    }
+
     public void honorRetryAfter(String provider, HttpHeaders headers, Duration fallbackDelay, String reason) {
         Duration delay = retryAfterDelay(headers, fallbackDelay);
         if (delay == null || delay.isNegative() || delay.isZero()) return;
@@ -66,6 +116,18 @@ public class ProviderResilience {
         ProviderState state = state(provider);
         state.cooldownUntilMs().accumulateAndGet(until, Math::max);
         log.warn("{} provider cooldown {}s: {}", provider, delay.toSeconds(), reason);
+    }
+
+    /** Thời gian cooldown dài nhất còn lại trong đúng các provider được hỏi. */
+    public Duration cooldownRemaining(String... providers) {
+        if (providers == null || providers.length == 0) return Duration.ZERO;
+        long now = System.currentTimeMillis();
+        long maxRemainingMs = 0;
+        for (String provider : providers) {
+            long remainingMs = state(provider).cooldownUntilMs().get() - now;
+            maxRemainingMs = Math.max(maxRemainingMs, remainingMs);
+        }
+        return maxRemainingMs > 0 ? Duration.ofMillis(maxRemainingMs) : Duration.ZERO;
     }
 
     private ProviderState state(String provider) {
@@ -90,8 +152,10 @@ public class ProviderResilience {
     }
 
     private Duration slowCallThreshold(String provider, ProviderResilienceProperties.CircuitBreaker cb) {
+        if (provider.startsWith(GOONG)) {
+            return Duration.ofSeconds(Math.max(1, cb.getGoongSlowCallSeconds()));
+        }
         return switch (provider) {
-            case GOONG -> Duration.ofSeconds(Math.max(1, cb.getGoongSlowCallSeconds()));
             case SERPAPI -> Duration.ofSeconds(Math.max(1, cb.getSerpApiSlowCallSeconds()));
             case LLM -> Duration.ofSeconds(Math.max(1, cb.getLlmSlowCallSeconds()));
             default -> Duration.ofSeconds(5);

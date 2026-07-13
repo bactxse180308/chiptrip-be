@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.enums.ActivityType;
 import com.tranbac.chiptripbe.common.enums.TripLifecycleStatus;
 import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.common.resilience.ProviderResilience;
 import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
@@ -51,6 +52,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -70,14 +72,17 @@ class TripServiceImpl implements TripService {
 
     private static final ZoneId VN_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
 
-    /** Chờ giữa pass1 và retry-pass enrich nền để rate window SerpApi dịu sau 429 (best-effort). */
-    private static final long BACKGROUND_RETRY_DELAY_MS = 5_000;
+    /** Backoff bền vững lần đầu; retry tiếp theo tăng theo cấp số nhân trong sweeper. */
+    private static final int ENRICH_RETRY_BASE_MINUTES = 5;
+
+    /** Trần backoff để trip lỗi tạm thời vẫn được thử lại nhưng không gây tải API liên tục. */
+    private static final int ENRICH_RETRY_MAX_MINUTES = 60;
 
     /** Bỏ qua trip mới tạo dưới ngưỡng này khi sweep — job nền in-memory có thể còn đang chạy. */
     private static final int ENRICH_SWEEP_GRACE_MINUTES = 3;
 
-    /** Trần số lần sweeper thử enrich lại 1 trip trước khi bỏ (địa điểm có thể không bao giờ có data). */
-    private static final int ENRICH_MAX_ATTEMPTS = 3;
+    /** Lease DB đủ dài cho tối đa khoảng 20 địa điểm; ngăn background và sweeper chạy trùng. */
+    private static final int ENRICH_CLAIM_LEASE_MINUTES = 30;
 
     /** Số trip xử lý mỗi lượt sweep — chặn 1 tick ôm quá nhiều việc. */
     private static final int ENRICH_SWEEP_BATCH = 20;
@@ -99,6 +104,7 @@ class TripServiceImpl implements TripService {
     private final ObjectMapper objectMapper;
     private final PlaceEnrichmentService placeEnrichmentService;
     private final PlaceCacheRepository placeCacheRepository;
+    private final ProviderResilience providerResilience;
     private final TripGenerationPersistenceService tripGenerationPersistenceService;
     private final SimpMessagingTemplate messagingTemplate;
     @Qualifier("enrichmentExecutor")
@@ -140,14 +146,23 @@ class TripServiceImpl implements TripService {
         // FE poll GET /trips/{id} sẽ tự thấy ảnh/review nảy ra dần (đọc PlaceCache live).
         if (needsBackgroundEnrichment) {
             Long tripId = response.getId();
-            Runnable job = outcome.backgroundJob();
-            // Bọc job: chạy xong (pass1 + retry-pass) thì tắt cờ enrichmentPending. Nếu job bị
+            BackgroundEnrichmentJob job = outcome.backgroundJob();
+            // Bọc job: chỉ tắt enrichmentPending khi pass hiện tại đã hoàn tất mọi địa điểm. Nếu chưa,
             // DiscardPolicy bỏ / app restart trước khi chạy → cờ giữ true → sweeper hoàn tất (durable).
             Runnable durableJob = () -> {
-                try {
-                    job.run();
-                } finally {
+                if (!tryClaimEnrichment(tripId)) return;
+                Duration activeCooldown = enrichmentCooldownRemaining();
+                if (!activeCooldown.isZero()) {
+                    tripRepository.deferEnrichmentRetry(
+                            tripId, LocalDateTime.now().plus(activeCooldown));
+                    return;
+                }
+                if (job.run(tripId)) {
                     completeEnrichment(userId, tripId);
+                } else {
+                    int previousAttempts = tripRepository.findEnrichmentAttemptsById(tripId).orElse(0);
+                    tripRepository.scheduleEnrichmentRetry(
+                            tripId, nextEnrichmentRetryAt(LocalDateTime.now(), previousAttempts + 1));
                 }
             };
             try {
@@ -226,11 +241,19 @@ class TripServiceImpl implements TripService {
      * Kết quả resolvePlaces: map place đã resolve (cho persist) + job enrich FULL ngầm cho ngày 2..N
      * (chạy SAU khi trip commit). backgroundJob == null nếu không có ngày nào cần enrich nền.
      */
-    private record ResolveOutcome(Map<AiItineraryResult.AiActivity, PlaceCache> resolved, Runnable backgroundJob) {}
+    private record ResolveOutcome(Map<AiItineraryResult.AiActivity, PlaceCache> resolved,
+                                  BackgroundEnrichmentJob backgroundJob) {}
+
+    @FunctionalInterface
+    private interface BackgroundEnrichmentJob {
+        /** @return true khi mọi địa điểm đã enrich đầy đủ và có thể tắt cờ pending. */
+        boolean run(Long tripId);
+    }
 
     /** Mô tả 1 nhóm địa điểm cần enrich FULL ở luồng nền. */
     private record BgEnrich(String searchQuery, String destination,
-                            List<PlaceEnrichmentService.GeoAnchor> anchors, boolean preferSerp, int minDay) {}
+                            List<PlaceEnrichmentService.GeoAnchor> anchors, boolean preferSerp, int minDay,
+                            boolean accommodation, LocalDate checkIn, LocalDate checkOut, Integer adults) {}
 
     /**
      * Thu thập tất cả geocodable activities từ itinerary rồi resolve song song.
@@ -330,14 +353,23 @@ class TripServiceImpl implements TripService {
                     (minDay >= 2 && !hasAccommodation)
                             ? PlaceEnrichmentService.EnrichmentDepth.BASIC
                             : PlaceEnrichmentService.EnrichmentDepth.FULL;
-            groupBg.add(new BgEnrich(first.getSearchQuery(), destination, List.copyOf(anchors), preferSerp, minDay));
+            LocalDate accommodationCheckIn = hasAccommodation
+                    ? group.stream().map(GeoActivity::date).filter(Objects::nonNull)
+                            .min(LocalDate::compareTo).orElse(tripStart)
+                    : null;
+            LocalDate accommodationCheckOut = hasAccommodation
+                    ? group.stream().map(GeoActivity::date).filter(Objects::nonNull)
+                            .max(LocalDate::compareTo).map(d -> d.plusDays(1)).orElse(tripEnd)
+                    : null;
+            groupBg.add(new BgEnrich(first.getSearchQuery(), destination, List.copyOf(anchors),
+                    preferSerp, minDay, hasAccommodation,
+                    accommodationCheckIn, accommodationCheckOut, adults));
             groupIsBasic.add(depth == PlaceEnrichmentService.EnrichmentDepth.BASIC);
 
             final boolean fHasAccommodation = hasAccommodation;
             final boolean fPreferSerp = preferSerp;
             final List<PlaceEnrichmentService.GeoAnchor> fAnchors = anchors;
             final PlaceEnrichmentService.EnrichmentDepth fDepth = depth;
-            final List<GeoActivity> fGroup = group;
             futures.add(CompletableFuture.supplyAsync(() -> {
                 try {
                     // allowScraper=false: foreground KHÔNG chờ scraper (chậm ~10-15s/điểm) — nhóm chưa
@@ -347,14 +379,8 @@ class TripServiceImpl implements TripService {
                             false, false);
                     placeOpt.ifPresent(cache -> {
                         if (fHasAccommodation) {
-                            // Check-in/out theo đúng dải đêm của khách sạn này (trip có thể
-                            // đổi khách sạn giữa chừng) — fallback range cả trip nếu thiếu date
-                            LocalDate checkIn = fGroup.stream().map(GeoActivity::date)
-                                    .filter(Objects::nonNull).min(LocalDate::compareTo).orElse(tripStart);
-                            LocalDate checkOut = fGroup.stream().map(GeoActivity::date)
-                                    .filter(Objects::nonNull).max(LocalDate::compareTo)
-                                    .map(d -> d.plusDays(1)).orElse(tripEnd);
-                            placeEnrichmentService.enrichAccommodation(cache, checkIn, checkOut, adults, deadline);
+                            placeEnrichmentService.enrichAccommodation(
+                                    cache, accommodationCheckIn, accommodationCheckOut, adults, deadline);
                         }
                     });
                     return placeOpt.orElse(null);
@@ -378,8 +404,8 @@ class TripServiceImpl implements TripService {
         // ghi xen vào map trong lúc persist đang đọc; mỗi group nguyên tử (có place cả nhóm).
         // Đồng thời gom danh sách enrich nền: (a) nhóm BASIC ngày 2..N (luôn nâng FULL như cũ);
         // (b) nhóm FULL (ngày 1 / khách sạn) mà SerpApi miss → serpEnriched=false: scraper enrich
-        // ở luồng nền (foreground đã bỏ scraper). Nhóm FULL geocode fail (cache==null) không đưa
-        // vào nền (thường do query xấu, re-resolve không cứu được).
+        // ở luồng nền (foreground đã bỏ scraper). Nhóm geocode fail (cache==null) cũng phải retry:
+        // provider có thể chỉ đang cooldown, và kết quả nền sẽ được gắn lại vào Activity sau khi persist.
         List<BgEnrich> bgList = new ArrayList<>();
         for (int i = 0; i < futures.size(); i++) {
             CompletableFuture<PlaceCache> f = futures.get(i);
@@ -390,7 +416,7 @@ class TripServiceImpl implements TripService {
                     result.put(ga.act(), cache);
                 }
             }
-            if (groupIsBasic.get(i) || (cache != null && !cache.isSerpEnriched())) {
+            if (cache == null || groupIsBasic.get(i) || !cache.isSerpEnriched()) {
                 bgList.add(groupBg.get(i));
             }
         }
@@ -405,52 +431,55 @@ class TripServiceImpl implements TripService {
      * cập nhật cùng PlaceCache mà Activity đang trỏ tới → FE poll thấy ảnh/review nảy ra dần.
      * Trả null nếu không có gì để enrich nền.
      */
-    private Runnable buildBackgroundEnrichJob(List<BgEnrich> bgList) {
+    private BackgroundEnrichmentJob buildBackgroundEnrichJob(List<BgEnrich> bgList) {
         if (bgList.isEmpty()) return null;
         bgList.sort(Comparator.comparingInt(BgEnrich::minDay));
         List<BgEnrich> jobs = List.copyOf(bgList);
-        return () -> {
-            log.info("Background FULL enrich start: {} place(s)", jobs.size());
-            List<BgEnrich> incomplete = new ArrayList<>();
+        return tripId -> {
+            log.info("Background FULL enrich start tripId={}: {} place(s)", tripId, jobs.size());
+            Map<String, List<Activity>> activitiesByCanonicalKey = new HashMap<>();
+            for (Activity activity : activityRepository
+                    .findByDayTripIdOrderByDayDayNumberAscDisplayOrderAsc(tripId)) {
+                ActivityType type = activity.getType() != null ? activity.getType() : ActivityType.OTHER;
+                if (!shouldGeocode(type)) continue;
+                if (activity.getSearchQuery() == null || activity.getSearchQuery().isBlank()) continue;
+                String key = placeEnrichmentService.canonicalKey(activity.getSearchQuery());
+                activitiesByCanonicalKey.computeIfAbsent(key, ignored -> new ArrayList<>()).add(activity);
+            }
             int ok = 0;
             for (BgEnrich b : jobs) {
-                if (enrichOnce(b, false)) ok++; else incomplete.add(b);
+                Optional<PlaceCache> resolved = resolveEnrichment(b, false);
+                if (resolved.isEmpty()) continue;
+                PlaceCache cache = resolved.get();
+                String key = placeEnrichmentService.canonicalKey(b.searchQuery());
+                boolean locationsUpdated = updateActivityLocations(
+                        activitiesByCanonicalKey.getOrDefault(key, List.of()), cache);
+                if (cache.isSerpEnriched() && locationsUpdated) ok++;
             }
-            log.info("Background FULL enrich pass1: {}/{} đủ, {} cần retry", ok, jobs.size(), incomplete.size());
-
-            // Retry-pass: place chưa đủ (serpEnriched=false) — thường do 429 ở fetch reviews/photos.
-            // Chờ rate window dịu rồi enrich lại với forceRefresh=true (bỏ qua backoff, nếu không
-            // findFreshCache sẽ trả lại chính row chưa đủ đó). Best-effort: 429 lần nữa thì thôi
-            // (refresh thụ động theo backoff vẫn còn). Place không có data thật vẫn false → bỏ qua sau retry.
-            if (incomplete.isEmpty()) {
-                log.info("Background FULL enrich done: tất cả đủ ở pass1");
-                return;
-            }
-            try {
-                Thread.sleep(BACKGROUND_RETRY_DELAY_MS);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-            int recovered = 0;
-            for (BgEnrich b : incomplete) {
-                if (enrichOnce(b, true)) recovered++;
-            }
-            log.info("Background FULL enrich retry: {}/{} hồi phục sau 429/thiếu data", recovered, incomplete.size());
+            int incomplete = jobs.size() - ok;
+            log.info("Background FULL enrich pass1 tripId={}: {}/{} đủ, {} hẹn retry bền vững",
+                    tripId, ok, jobs.size(), incomplete);
+            return incomplete == 0;
         };
     }
 
-    /** 1 lần enrich FULL nền cho 1 nhóm; trả true nếu row kết quả đã serpEnriched. fail-soft. */
-    private boolean enrichOnce(BgEnrich b, boolean forceRefresh) {
+    /** 1 lần enrich FULL nền cho 1 nhóm; trả row kết quả để caller kiểm tra và gắn lại Activity. */
+    private Optional<PlaceCache> resolveEnrichment(BgEnrich b, boolean forceRefresh) {
         try {
-            Optional<PlaceCache> r = placeEnrichmentService.resolvePlace(
+            Optional<PlaceCache> resolved = placeEnrichmentService.resolvePlace(
                     b.searchQuery(), b.destination(), b.anchors(), null, b.preferSerp(),
                     PlaceEnrichmentService.EnrichmentDepth.FULL, forceRefresh);
-            return r.isPresent() && r.get().isSerpEnriched();
+            if (b.accommodation()) {
+                // Giá/link phụ thuộc nhà cung cấp và có thể không tồn tại nên vẫn là best-effort;
+                // cờ pending đo FULL place data (tọa độ/ảnh/review), không đo availability khách sạn.
+                resolved.ifPresent(cache -> placeEnrichmentService.enrichAccommodation(
+                        cache, b.checkIn(), b.checkOut(), b.adults(), null));
+            }
+            return resolved;
         } catch (Exception e) {
             log.warn("Background FULL enrich {} failed for '{}': {}",
                     forceRefresh ? "retry" : "pass1", b.searchQuery(), e.getMessage());
-            return false;
+            return Optional.empty();
         }
     }
 
@@ -458,75 +487,172 @@ class TripServiceImpl implements TripService {
      * Durable safety-net cho enrich nền (P1): job nền ngày 2..N submit vào executor in-memory là
      * best-effort — mất khi app restart / queue DiscardPolicy / provider down lâu. Method này (gọi
      * bởi TripEnrichmentScheduler) quét các trip còn enrichmentPending mà job nền lẽ ra đã xong,
-     * reconstruct danh sách địa điểm chưa FULL TỪ DB rồi enrich lại; tắt cờ khi xong hoặc hết số lần thử.
+     * reconstruct danh sách địa điểm chưa FULL TỪ DB rồi enrich lại; chỉ tắt cờ khi thực sự xong.
      *
      * NOT_SUPPORTED để KHÔNG giữ DB transaction trong lúc gọi Goong/SerpApi (giống generateTrip).
      */
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void sweepPendingEnrichments() {
-        LocalDateTime createdBefore = LocalDateTime.now().minusMinutes(ENRICH_SWEEP_GRACE_MINUTES);
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime createdBefore = now.minusMinutes(ENRICH_SWEEP_GRACE_MINUTES);
         List<Trip> pending = tripRepository.findPendingEnrichment(
-                createdBefore, ENRICH_MAX_ATTEMPTS, PageRequest.of(0, ENRICH_SWEEP_BATCH));
+                createdBefore, now, PageRequest.of(0, ENRICH_SWEEP_BATCH));
         if (pending.isEmpty()) return;
         log.info("TripEnrichmentSweeper: {} trip còn enrichment pending → enrich lại", pending.size());
         for (Trip trip : pending) {
+            if (!tryClaimEnrichment(trip.getId())) continue;
+            Duration activeCooldown = enrichmentCooldownRemaining();
+            if (!activeCooldown.isZero()) {
+                LocalDateTime retryAt = LocalDateTime.now().plus(activeCooldown);
+                tripRepository.deferEnrichmentRetry(trip.getId(), retryAt);
+                log.info("Sweep enrich trip id={} hoãn đến {} vì provider còn cooldown {}s",
+                        trip.getId(), retryAt, activeCooldown.toSeconds());
+                continue;
+            }
+
             int remaining;
             try {
                 remaining = reEnrichTripPlaces(trip);
             } catch (Exception e) {
                 log.warn("Sweep enrich trip id={} lỗi: {}", trip.getId(), e.getMessage());
-                remaining = Integer.MAX_VALUE;   // coi như còn dở → theo trần attempts để dừng
+                remaining = Integer.MAX_VALUE;
             }
-            boolean lastAttempt = trip.getEnrichmentAttempts() + 1 >= ENRICH_MAX_ATTEMPTS;
-            if (remaining == 0 || lastAttempt) {
+            if (remaining == 0) {
                 completeEnrichment(trip.getUser().getId(), trip.getId());
             } else {
-                tripRepository.incrementEnrichmentAttempts(trip.getId());
+                int previousAttempts = trip.getEnrichmentAttempts() != null
+                        ? trip.getEnrichmentAttempts()
+                        : 0;
+                int failedAttempts = previousAttempts + 1;
+                LocalDateTime retryAt = nextEnrichmentRetryAt(LocalDateTime.now(), failedAttempts);
+                tripRepository.scheduleEnrichmentRetry(trip.getId(), retryAt);
+                log.info("Sweep enrich trip id={} còn {} nhóm, attempt={} → thử lại lúc {}",
+                        trip.getId(), remaining, failedAttempts, retryAt);
             }
         }
     }
 
+    private boolean tryClaimEnrichment(Long tripId) {
+        LocalDateTime now = LocalDateTime.now();
+        int claimed = tripRepository.tryClaimEnrichment(
+                tripId, now, now.plusMinutes(ENRICH_CLAIM_LEASE_MINUTES));
+        if (claimed == 0) {
+            log.debug("Skip enrichment trip id={}: đã được worker khác claim hoặc không còn pending", tripId);
+        }
+        return claimed > 0;
+    }
+
+    private Duration enrichmentCooldownRemaining() {
+        return providerResilience.cooldownRemaining(
+                ProviderResilience.SERPAPI, ProviderResilience.GOONG_GEOCODE);
+    }
+
+    private LocalDateTime nextEnrichmentRetryAt(LocalDateTime now, int failedAttempts) {
+        int exponent = Math.min(4, Math.max(0, failedAttempts - 1));
+        long backoffMinutes = Math.min(
+                ENRICH_RETRY_MAX_MINUTES,
+                ENRICH_RETRY_BASE_MINUTES * (1L << exponent));
+        Duration backoff = Duration.ofMinutes(backoffMinutes);
+        Duration cooldown = enrichmentCooldownRemaining();
+        Duration delay = cooldown.compareTo(backoff) > 0 ? cooldown : backoff;
+        return now.plus(delay);
+    }
+
     /**
      * Reconstruct từ DB các nhóm địa điểm CHƯA FULL (BASIC/serp-miss) của 1 trip rồi enrich lại FULL.
-     * Trả số nhóm vẫn chưa FULL sau lượt enrich (0 = đã đủ hết). Chỉ enrich địa điểm ĐÃ resolve toạ độ
-     * (có placeCacheId) — activity chưa geocode được (query xấu) re-resolve cũng khó cứu nên bỏ qua.
+     * Trả số nhóm vẫn chưa FULL sau lượt enrich (0 = đã đủ hết). Activity chưa có placeCacheId cũng
+     * được resolve lại và gắn cache mới vào DB; đây là trường hợp Goong tạm cooldown ở lượt đầu.
      */
     private int reEnrichTripPlaces(Trip trip) {
         List<TripDay> days = tripDayRepository.findByTripIdOrderByDayNumber(trip.getId());
-        List<Activity> activities = days.stream()
-                .flatMap(d -> activityRepository.findByDayIdOrderByDisplayOrder(d.getId()).stream())
-                .toList();
+        List<Activity> activities = new ArrayList<>();
+        Map<Long, LocalDate> activityDates = new HashMap<>();
+        for (TripDay day : days) {
+            List<Activity> dayActivities = activityRepository.findByDayIdOrderByDisplayOrder(day.getId());
+            activities.addAll(dayActivities);
+            for (Activity activity : dayActivities) {
+                if (activity.getId() != null) activityDates.put(activity.getId(), day.getDate());
+            }
+        }
         List<Long> placeCacheIds = activities.stream()
                 .map(Activity::getPlaceCacheId).filter(Objects::nonNull).distinct().toList();
-        if (placeCacheIds.isEmpty()) return 0;
         Map<Long, PlaceCache> cacheMap = new HashMap<>();
-        placeCacheRepository.findAllById(placeCacheIds).forEach(p -> cacheMap.put(p.getId(), p));
+        if (!placeCacheIds.isEmpty()) {
+            placeCacheRepository.findAllById(placeCacheIds).forEach(p -> cacheMap.put(p.getId(), p));
+        }
 
         // Dedup theo canonicalKey (như luồng foreground); preferSerp theo type (FOOD/ATTRACTION ưu tiên
         // SerpApi). Anchors để rỗng: row đã có trong cache theo canonicalKey → enrich lại đúng row đó.
-        Map<String, BgEnrich> groups = new LinkedHashMap<>();
+        Map<String, List<Activity>> activitiesByGroup = new LinkedHashMap<>();
         for (Activity act : activities) {
             ActivityType type = act.getType() != null ? act.getType() : ActivityType.OTHER;
             if (!shouldGeocode(type)) continue;
-            Long pcId = act.getPlaceCacheId();
-            if (pcId == null) continue;
-            PlaceCache pc = cacheMap.get(pcId);
-            if (pc == null || pc.isSerpEnriched()) continue;   // đã FULL → bỏ qua
             String q = act.getSearchQuery();
             if (q == null || q.isBlank()) continue;
-            boolean preferSerp = type == ActivityType.FOOD || type == ActivityType.ATTRACTION;
-            groups.putIfAbsent(placeEnrichmentService.canonicalKey(q),
-                    new BgEnrich(q, trip.getDestination(), List.of(), preferSerp, 0));
+            PlaceCache pc = act.getPlaceCacheId() != null ? cacheMap.get(act.getPlaceCacheId()) : null;
+            if (pc != null && pc.isSerpEnriched()) continue;
+            String canonicalKey = placeEnrichmentService.canonicalKey(q);
+            activitiesByGroup.computeIfAbsent(canonicalKey, ignored -> new ArrayList<>()).add(act);
         }
-        if (groups.isEmpty()) return 0;
+        if (activitiesByGroup.isEmpty()) return 0;
         int stillIncomplete = 0;
         // forceRefresh sau lần thử đầu để bỏ qua backoff nếu row vẫn kẹt serpEnriched=false.
-        boolean forceRefresh = trip.getEnrichmentAttempts() > 0;
-        for (BgEnrich b : groups.values()) {
-            if (!enrichOnce(b, forceRefresh)) stillIncomplete++;
+        boolean forceRefresh = trip.getEnrichmentAttempts() != null && trip.getEnrichmentAttempts() > 0;
+        for (Map.Entry<String, List<Activity>> entry : activitiesByGroup.entrySet()) {
+            List<Activity> groupActivities = entry.getValue();
+            Activity first = groupActivities.get(0);
+            boolean accommodation = groupActivities.stream()
+                    .anyMatch(a -> a.getType() == ActivityType.ACCOMMODATION);
+            boolean hasTransport = groupActivities.stream()
+                    .anyMatch(a -> a.getType() == ActivityType.TRANSPORT);
+            boolean hasNamedPoi = groupActivities.stream()
+                    .anyMatch(a -> a.getType() == ActivityType.FOOD || a.getType() == ActivityType.ATTRACTION);
+            boolean preferSerp = hasNamedPoi && !hasTransport && !accommodation;
+            LocalDate checkIn = accommodation
+                    ? groupActivities.stream().map(Activity::getId).map(activityDates::get)
+                            .filter(Objects::nonNull).min(LocalDate::compareTo).orElse(trip.getDateStart())
+                    : null;
+            LocalDate checkOut = accommodation
+                    ? groupActivities.stream().map(Activity::getId).map(activityDates::get)
+                            .filter(Objects::nonNull).max(LocalDate::compareTo).map(d -> d.plusDays(1))
+                            .orElse(trip.getDateEnd())
+                    : null;
+            BgEnrich background = new BgEnrich(first.getSearchQuery(), trip.getDestination(), List.of(),
+                    preferSerp, 0, accommodation, checkIn, checkOut, trip.getPeopleCount());
+            Optional<PlaceCache> resolved = resolveEnrichment(background, forceRefresh);
+            if (resolved.isEmpty()) {
+                stillIncomplete++;
+                continue;
+            }
+            PlaceCache cache = resolved.get();
+            boolean locationsUpdated = updateActivityLocations(groupActivities, cache);
+            if (!cache.isSerpEnriched() || !locationsUpdated) stillIncomplete++;
         }
         return stillIncomplete;
+    }
+
+    private boolean updateActivityLocations(List<Activity> activities, PlaceCache cache) {
+        if (cache.getId() == null || activities.isEmpty()) return false;
+        String provider = cache.getGoongPlaceId() != null ? "goong" : "serpapi";
+        boolean allUpdated = true;
+        for (Activity activity : activities) {
+            if (activity.getId() == null) {
+                allUpdated = false;
+                continue;
+            }
+            int updated = activityRepository.updateResolvedPlaceIfQueryUnchanged(
+                    activity.getId(),
+                    activity.getSearchQuery(),
+                    cache.getId(),
+                    cache.getLatitude(),
+                    cache.getLongitude(),
+                    cache.getGoongPlaceId(),
+                    cache.getAddress(),
+                    provider);
+            if (updated == 0) allUpdated = false;
+        }
+        return allUpdated;
     }
 
     @Override
@@ -816,6 +942,7 @@ class TripServiceImpl implements TripService {
     /** Tắt cờ durable trước, sau đó push best-effort để FE refetch ngay thay vì chờ polling. */
     private void completeEnrichment(Long userId, Long tripId) {
         tripRepository.markEnrichmentDone(tripId);
+        log.info("Trip enrichment complete tripId={} userId={}", tripId, userId);
         try {
             messagingTemplate.convertAndSendToUser(
                     String.valueOf(userId), ENRICHMENT_DESTINATION, TripEnrichmentResultDto.done(tripId));

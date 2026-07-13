@@ -67,7 +67,7 @@ public class SerpApiClient {
      * pool tự gắn key và xoay vòng khi key hết lượt.
      */
     private Map<String, Object> searchRequest(Consumer<UriBuilder> params) {
-        return executeSearch(params, true);
+        return executeSearch(params);
     }
 
     /**
@@ -75,16 +75,16 @@ public class SerpApiClient {
      * gặp 401 (key sai/hết lượt) hoặc body báo "out of searches" → đánh dấu key đó exhausted
      * rồi thử key kế tiếp. Hết key khả dụng → trả null (caller fail-soft về Goong).
      *
-     * throttle=true: chờ token bucket tối đa ≈ nửa HTTP timeout, hết token → null.
+     * Mọi request chờ token bucket tối đa ≈ nửa HTTP timeout; hết token thì trả null.
      * Lỗi HTTP khác 401 (429/5xx/timeout) để nguyên cho caller bắt (fail-soft về Goong).
      */
-    private Map<String, Object> executeSearch(Consumer<UriBuilder> params, boolean throttle) {
+    private Map<String, Object> executeSearch(Consumer<UriBuilder> params) {
         return providerResilience.execute(ProviderResilience.SERPAPI,
-                () -> executeSearchInternal(params, throttle),
+                () -> executeSearchInternal(params),
                 () -> null);
     }
 
-    private Map<String, Object> executeSearchInternal(Consumer<UriBuilder> params, boolean throttle) {
+    private Map<String, Object> executeSearchInternal(Consumer<UriBuilder> params) {
         List<String> keys = keyPool.availableKeys();
         if (keys.isEmpty()) {
             log.warn("SerpApi: không còn key khả dụng (chưa cấu hình hoặc tất cả đang cooldown) — bỏ qua request");
@@ -94,12 +94,13 @@ public class SerpApiClient {
         // thay vì mỗi thread đốt trọn timeoutSeconds chỉ để chờ token rồi vượt deadline enrichment.
         long acquireWaitSeconds = Math.max(1, properties.getTimeoutSeconds() / 2);
         try {
-            if (throttle && !bucket.tryAcquire(acquireWaitSeconds * 1000L)) {
-                log.warn("SerpApi throttle: hết token rate ({}/s) sau {}s — bỏ qua request",
-                        properties.getRequestsPerSecond(), acquireWaitSeconds);
-                return null;
-            }
             for (String key : keys) {
+                // Mỗi key được thử là một HTTP request thật, nên phải tiêu thụ token riêng.
+                if (!bucket.tryAcquire(acquireWaitSeconds * 1000L)) {
+                    log.warn("SerpApi throttle: hết token rate ({}/s) sau {}s — bỏ qua request",
+                            properties.getRequestsPerSecond(), acquireWaitSeconds);
+                    return null;
+                }
                 try {
                     Map<String, Object> resp = client.get()
                             .uri(b -> {
@@ -113,7 +114,7 @@ public class SerpApiClient {
                             .timeout(Duration.ofSeconds(properties.getTimeoutSeconds()))
                             .block();
                     if (resp != null && isQuotaError(resp.get("error"))) {
-                        keyPool.markExhausted(key);
+                        keyPool.markQuotaExhausted(key);
                         continue; // thử key kế tiếp
                     }
                     return resp;
@@ -122,6 +123,9 @@ public class SerpApiClient {
                     if (status == 401) {
                         keyPool.markExhausted(key);
                         // 401 = key sai hoặc hết lượt → thử key kế tiếp
+                    } else if (status == 429 && isQuotaError(e.getResponseBodyAsString())) {
+                        // Hết quota theo account: chỉ loại key này, không cooldown toàn SerpApi.
+                        keyPool.markQuotaExhausted(key);
                     } else if (status == 429 || status == 503) {
                         providerResilience.honorRetryAfter(ProviderResilience.SERPAPI, e.getHeaders(),
                                 Duration.ofSeconds(properties.getRetryBackoffMinutes() * 60L),
@@ -779,7 +783,7 @@ public class SerpApiClient {
                         .queryParam("hl", "vi");
                 if (roundTrip) b.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
                 if (departureToken != null && !departureToken.isBlank()) b.queryParam("departure_token", departureToken);
-            }, false);
+            });
             if (resp == null) return List.of();
             List<FlightOption> options = new ArrayList<>();
             parseFlightArray(resp.get("best_flights"), options);
@@ -855,7 +859,7 @@ public class SerpApiClient {
                         .queryParam("hl", "vi")
                         .queryParam("booking_token", bookingToken);
                 if (roundTrip) b.queryParam("return_date", returnDate.format(HOTEL_DATE_FORMAT));
-            }, false);
+            });
             if (resp == null) return List.of();
             List<FlightBookingOption> result = new ArrayList<>();
             if (resp.get("booking_options") instanceof List<?> opts) {

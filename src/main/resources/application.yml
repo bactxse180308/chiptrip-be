@@ -77,6 +77,7 @@ app:
     api-key: ${GOONG_API_KEY}
     base-url: https://rsapi.goong.io
     timeout-seconds: 5
+    requests-per-second: 4
   serpapi:
     # Một hoặc nhiều API key ngăn cách bằng dấu phẩy (xoay vòng, tự bỏ qua key hết lượt).
     api-key: ${SERPAPI_API_KEY:}

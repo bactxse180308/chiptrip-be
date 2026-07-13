@@ -125,4 +125,21 @@ class GoongClientTest {
         assertNull(parsed.get().provinceName());
         assertNull(parsed.get().communeName());
     }
+
+    @Test
+    void operationsUseIndependentResilienceScopes() {
+        assertEquals(ProviderResilience.GOONG_GEOCODE,
+                GoongClient.resilienceProviderFor("forward geocode"));
+        assertEquals(ProviderResilience.GOONG_GEOCODE,
+                GoongClient.resilienceProviderFor("reverse geocode"));
+        assertEquals(ProviderResilience.GOONG_ROUTE,
+                GoongClient.resilienceProviderFor("direction"));
+        assertEquals(ProviderResilience.GOONG_ROUTE,
+                GoongClient.resilienceProviderFor("distance matrix"));
+        assertEquals(ProviderResilience.GOONG_AUTOCOMPLETE,
+                GoongClient.resilienceProviderFor("autocomplete"));
+        assertEquals(ProviderResilience.GOONG_AUTOCOMPLETE,
+                GoongClient.resilienceProviderFor("place detail"));
+    }
+
 }

@@ -13,4 +13,6 @@ public class GoongProperties {
     private String apiKey;
     private String baseUrl = "https://rsapi.goong.io";
     private int timeoutSeconds = 5;
+    /** Nhịp gọi chung của toàn bộ Goong operation trên một backend instance. */
+    private double requestsPerSecond = 4.0;
 }
