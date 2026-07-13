@@ -14,6 +14,7 @@ import com.tranbac.chiptripbe.module.trip.entity.TripDay;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
 import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripEnrichmentResultDto;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityAlternativeSessionRepository;
 import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
@@ -34,6 +35,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -86,6 +88,7 @@ class TripServiceImplTest {
     @Mock private PlaceEnrichmentService placeEnrichmentService;
     @Mock private PlaceCacheRepository placeCacheRepository;
     @Mock private TripGenerationPersistenceService tripGenerationPersistenceService;
+    @Mock private SimpMessagingTemplate messagingTemplate;
     @Mock private Executor enrichmentExecutor;
     @Mock private Executor backgroundEnrichmentExecutor;
 
@@ -110,6 +113,7 @@ class TripServiceImplTest {
                 placeEnrichmentService,
                 placeCacheRepository,
                 tripGenerationPersistenceService,
+                messagingTemplate,
                 enrichmentExecutor,
                 backgroundEnrichmentExecutor);
         doAnswer(inv -> {
@@ -297,7 +301,8 @@ class TripServiceImplTest {
     @Test
     void sweepPendingEnrichments_reEnrichesNotFullPlaceThenMarksDone() {
         // P1 durable: trip còn pending → sweeper reconstruct từ DB, enrich lại thành công → tắt cờ.
-        Trip trip = Trip.builder().destination("Đà Lạt").enrichmentPending(true).build();
+        User owner = normalUser();
+        Trip trip = Trip.builder().user(owner).destination("Đà Lạt").enrichmentPending(true).build();
         trip.setId(77L);
         when(tripRepository.findPendingEnrichment(any(LocalDateTime.class), eq(3), any()))
                 .thenReturn(List.of(trip));
@@ -322,7 +327,45 @@ class TripServiceImplTest {
         service.sweepPendingEnrichments();
 
         verify(tripRepository).markEnrichmentDone(77L);
+        verify(messagingTemplate).convertAndSendToUser(
+                "1", "/queue/trip-enrichment", TripEnrichmentResultDto.done(77L));
         verify(tripRepository, never()).incrementEnrichmentAttempts(anyLong());
+    }
+
+    @Test
+    void getTripDetail_loadsActivitiesOnceForAllDays() {
+        User owner = normalUser();
+        LocalDate start = LocalDate.now(VN);
+        Trip trip = Trip.builder()
+                .user(owner)
+                .destination("Đà Lạt")
+                .dateStart(start)
+                .dateEnd(start.plusDays(1))
+                .build();
+        trip.setId(77L);
+
+        TripDay day1 = TripDay.builder().trip(trip).dayNumber(1).date(start).build();
+        day1.setId(11L);
+        TripDay day2 = TripDay.builder().trip(trip).dayNumber(2).date(start.plusDays(1)).build();
+        day2.setId(12L);
+        Activity first = Activity.builder().day(day1).name("Hồ Xuân Hương").displayOrder(1).build();
+        first.setId(101L);
+        Activity second = Activity.builder().day(day2).name("Đồi chè").displayOrder(1).build();
+        second.setId(102L);
+
+        when(tripRepository.findById(77L)).thenReturn(Optional.of(trip));
+        when(tripDayRepository.findByTripIdOrderByDayNumber(77L)).thenReturn(List.of(day1, day2));
+        when(checklistItemRepository.findByTripIdOrderByDisplayOrder(77L)).thenReturn(List.of());
+        when(activityRepository.findByTripIdWithDayOrderByDayAndOrder(77L)).thenReturn(List.of(first, second));
+        when(tripMemberRepository.findByTripIdWithUser(77L)).thenReturn(List.of());
+
+        var response = service.getTripDetail(USER_ID, 77L);
+
+        assertEquals(2, response.getDays().size());
+        assertEquals("Hồ Xuân Hương", response.getDays().get(0).getActivities().get(0).getName());
+        assertEquals("Đồi chè", response.getDays().get(1).getActivities().get(0).getName());
+        verify(activityRepository, times(1)).findByTripIdWithDayOrderByDayAndOrder(77L);
+        verify(activityRepository, never()).findByDayIdOrderByDisplayOrder(anyLong());
     }
 
     private void stubUser(User user) {

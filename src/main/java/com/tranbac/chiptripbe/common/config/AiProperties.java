@@ -17,6 +17,14 @@ public class AiProperties {
     private OpenAiCompat openaiCompat = new OpenAiCompat();
     private int maxRetries = 1;
     private int timeoutSeconds = 90;
+
+    /** Số lần CHỜ+thử lại trong cùng request khi provider trả 503 "high demand" (spike thường qua nhanh). */
+    private int busyMaxRetries = 3;
+    /** Số giây chờ giữa các lần thử lại khi 503 (chờ THẬT để model hạ tải, khác backoff nội dung ms). */
+    private int busyBackoffSeconds = 4;
+    /** Cooldown NGẮN đặt cho circuit LLM sau khi hết lượt chờ 503 — thay cho honor-retry-after 60s cũ. */
+    private int busyCooldownSeconds = 10;
+
     private Pricing pricing = new Pricing();
 
     @Getter

@@ -66,7 +66,7 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
      * Durable enrich sweeper: trip còn enrichmentPending, đã tạo đủ lâu (job nền in-memory lẽ ra
      * xong hoặc đã chết), chưa vượt trần số lần thử. ORDER BY createdAt → xử lý chuyến cũ trước.
      */
-    @Query("SELECT t FROM Trip t WHERE t.enrichmentPending = true " +
+    @Query("SELECT t FROM Trip t JOIN FETCH t.user WHERE t.enrichmentPending = true " +
            "AND t.createdAt < :createdBefore AND t.enrichmentAttempts < :maxAttempts " +
            "ORDER BY t.createdAt ASC")
     List<Trip> findPendingEnrichment(@Param("createdBefore") LocalDateTime createdBefore,

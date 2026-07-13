@@ -17,6 +17,7 @@ import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.response.ShareTokenResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripEnrichmentResultDto;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripMemberResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
@@ -44,6 +45,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.messaging.MessagingException;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -79,6 +82,8 @@ class TripServiceImpl implements TripService {
     /** Số trip xử lý mỗi lượt sweep — chặn 1 tick ôm quá nhiều việc. */
     private static final int ENRICH_SWEEP_BATCH = 20;
 
+    private static final String ENRICHMENT_DESTINATION = "/queue/trip-enrichment";
+
     private final TripRepository tripRepository;
     private final TripDayRepository tripDayRepository;
     private final ActivityRepository activityRepository;
@@ -95,6 +100,7 @@ class TripServiceImpl implements TripService {
     private final PlaceEnrichmentService placeEnrichmentService;
     private final PlaceCacheRepository placeCacheRepository;
     private final TripGenerationPersistenceService tripGenerationPersistenceService;
+    private final SimpMessagingTemplate messagingTemplate;
     @Qualifier("enrichmentExecutor")
     private final Executor enrichmentExecutor;
     @Qualifier("backgroundEnrichmentExecutor")
@@ -141,7 +147,7 @@ class TripServiceImpl implements TripService {
                 try {
                     job.run();
                 } finally {
-                    tripRepository.markEnrichmentDone(tripId);
+                    completeEnrichment(userId, tripId);
                 }
             };
             try {
@@ -474,7 +480,7 @@ class TripServiceImpl implements TripService {
             }
             boolean lastAttempt = trip.getEnrichmentAttempts() + 1 >= ENRICH_MAX_ATTEMPTS;
             if (remaining == 0 || lastAttempt) {
-                tripRepository.markEnrichmentDone(trip.getId());
+                completeEnrichment(trip.getUser().getId(), trip.getId());
             } else {
                 tripRepository.incrementEnrichmentAttempts(trip.getId());
             }
@@ -721,9 +727,12 @@ class TripServiceImpl implements TripService {
     private TripDetailResponse buildTripDetailResponse(Trip trip) {
         List<TripDay> days = tripDayRepository.findByTripIdOrderByDayNumber(trip.getId());
         List<ChecklistItem> checklist = checklistItemRepository.findByTripIdOrderByDisplayOrder(trip.getId());
+        List<Activity> activities = activityRepository.findByTripIdWithDayOrderByDayAndOrder(trip.getId());
+        Map<Long, List<Activity>> activitiesByDay = activities.stream()
+                .collect(java.util.stream.Collectors.groupingBy(
+                        activity -> activity.getDay().getId(), LinkedHashMap::new, java.util.stream.Collectors.toList()));
 
-        List<Long> placeCacheIds = days.stream()
-                .flatMap(day -> activityRepository.findByDayIdOrderByDisplayOrder(day.getId()).stream())
+        List<Long> placeCacheIds = activities.stream()
                 .map(Activity::getPlaceCacheId)
                 .filter(Objects::nonNull)
                 .distinct()
@@ -740,8 +749,8 @@ class TripServiceImpl implements TripService {
         boolean enriching = trip.isEnrichmentPending();
 
         List<TripDetailResponse.DayDetail> dayDetails = days.stream().map(day -> {
-            List<Activity> activities = activityRepository.findByDayIdOrderByDisplayOrder(day.getId());
-            List<TripDetailResponse.ActivityDetail> activityDetails = activities.stream()
+            List<TripDetailResponse.ActivityDetail> activityDetails = activitiesByDay
+                    .getOrDefault(day.getId(), List.of()).stream()
                     .map(act -> toTripDetailActivityDetail(act, cacheMap)).toList();
             return TripDetailResponse.DayDetail.builder()
                     .id(day.getId())
@@ -802,6 +811,17 @@ class TripServiceImpl implements TripService {
                 .days(dayDetails)
                 .checklist(checklistDetails)
                 .build();
+    }
+
+    /** Tắt cờ durable trước, sau đó push best-effort để FE refetch ngay thay vì chờ polling. */
+    private void completeEnrichment(Long userId, Long tripId) {
+        tripRepository.markEnrichmentDone(tripId);
+        try {
+            messagingTemplate.convertAndSendToUser(
+                    String.valueOf(userId), ENRICHMENT_DESTINATION, TripEnrichmentResultDto.done(tripId));
+        } catch (MessagingException ex) {
+            log.warn("Failed to push trip-enrichment result via WS to userId={}: {}", userId, ex.getMessage());
+        }
     }
 
     private TripSummaryResponse toSummaryResponse(Trip trip, String imageUrl) {

@@ -59,6 +59,8 @@ class AiGenerateServiceImpl implements AiService {
         // tới (số key) lần, đẩy request lên ~165s và vượt timeout 60s phía client.
         int keyRotationsLeft = aiKeyPool.size();
         int contentRetriesLeft = aiProperties.getMaxRetries();
+        // Ngân sách RIÊNG cho 503 "high demand": không ăn vào lượt retry nội dung, chờ thật rồi thử lại.
+        int busyRetriesLeft = Math.max(0, aiProperties.getBusyMaxRetries());
 
         while (true) {
             String apiKey = aiKeyPool.current();
@@ -80,6 +82,20 @@ class AiGenerateServiceImpl implements AiService {
                 log.error("Non-retryable AI error: {}", e.getMessage());
                 throw AppException.badRequest("Không thể tạo lịch trình: " + e.getMessage());
 
+            } catch (AiProviderBusyException e) {
+                // Gemini 503 "high demand": chờ THẬT rồi thử lại chính provider (spike thường qua nhanh),
+                // KHÔNG fail cứng như trước. Hết lượt chờ → cooldown NGẮN để request khác đỡ dồn vào model quá tải.
+                if (busyRetriesLeft-- <= 0) {
+                    providerResilience.cooldown(ProviderResilience.LLM,
+                            Duration.ofSeconds(Math.max(1, aiProperties.getBusyCooldownSeconds())),
+                            "AI 503 high-demand hết lượt chờ");
+                    log.error("AI 503 high-demand kéo dài, hết lượt chờ trong request: {}", e.getMessage());
+                    throw AppException.internal("AI đang quá tải tạm thời. Vui lòng thử lại sau ít phút.");
+                }
+                int waitS = Math.max(1, aiProperties.getBusyBackoffSeconds());
+                log.warn("AI 503 high-demand, chờ {}s rồi thử lại (còn {} lượt)", waitS, busyRetriesLeft);
+                sleepSeconds(waitS);
+
             } catch (AiKeyExhaustedException e) {
                 aiKeyPool.rotate(apiKey);
                 if (keyRotationsLeft-- <= 0) {
@@ -97,6 +113,16 @@ class AiGenerateServiceImpl implements AiService {
                 log.warn("AI output lỗi, retry (còn {} lượt): {}", contentRetriesLeft, e.getMessage());
                 sleepBackoff(aiProperties.getMaxRetries() - contentRetriesLeft - 1);
             }
+        }
+    }
+
+    /** Chờ N giây (interruptible) giữa các lần thử lại khi provider báo 503 high-demand. */
+    private void sleepSeconds(int seconds) {
+        try {
+            Thread.sleep(seconds * 1000L);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw AppException.internal("Tạo lịch trình bị gián đoạn");
         }
     }
 
@@ -412,9 +438,10 @@ class AiGenerateServiceImpl implements AiService {
                                 .map(errorBody -> {
                                     int status = response.statusCode().value();
                                     if (status == 503) {
-                                        providerResilience.honorRetryAfter(ProviderResilience.LLM,
-                                                response.headers().asHttpHeaders(), Duration.ofSeconds(60),
-                                                "AI HTTP 503");
+                                        // 503 "high demand" của Gemini là TẠM THỜI. KHÔNG mở cooldown dài ở đây
+                                        // (cooldown sẽ giết luôn lần retry trong cùng request → fail cứng).
+                                        // Ném busy → vòng ngoài chờ THẬT vài giây rồi thử lại chính provider.
+                                        return (Throwable) new AiProviderBusyException("AI HTTP 503: " + errorBody);
                                     }
                                     return (Throwable) new AiRetryableException(
                                             "AI HTTP " + status + ": " + errorBody);
@@ -484,6 +511,11 @@ class AiGenerateServiceImpl implements AiService {
 
     static class AiNonRetryableException extends RuntimeException {
         AiNonRetryableException(String msg) { super(msg); }
+    }
+
+    /** Provider trả 503 "high demand" (UNAVAILABLE) — tạm thời; chờ rồi thử lại, KHÔNG mở cooldown dài. */
+    static class AiProviderBusyException extends RuntimeException {
+        AiProviderBusyException(String msg) { super(msg); }
     }
 
     /** Key bị từ chối (429 quota / 401-403 invalid) → xoay sang key khác rồi thử lại. */
