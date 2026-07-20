@@ -1,10 +1,12 @@
 package com.tranbac.chiptripbe.module.place.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.tranbac.chiptripbe.module.place.enums.PhotoSyncStatus;
 import lombok.Builder;
 import lombok.Getter;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Getter
@@ -29,6 +31,9 @@ public class PlaceDto {
     private List<OpeningHour> openingHours;
 
     private List<PlacePhoto> photos;
+    private LocalDateTime photosSyncedAt;
+    private PhotoSyncStatus photosStatus;
+    private Integer photoFailureCount;
     private List<PlaceReview> reviews;
     private String phone;
     private String website;

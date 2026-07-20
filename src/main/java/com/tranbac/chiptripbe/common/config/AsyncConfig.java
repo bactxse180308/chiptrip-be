@@ -67,4 +67,19 @@ public class AsyncConfig {
         executor.initialize();
         return executor;
     }
+
+    /** Pool nho, tach rieng de refresh anh hong khong bi ket sau cac job enrich dai. */
+    @Bean("photoRefreshExecutor")
+    public Executor photoRefreshExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(1);
+        executor.setMaxPoolSize(2);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("photo-refresh-");
+        executor.setWaitForTasksToCompleteOnShutdown(false);
+        // Neu queue day, row van o STALE va co the duoc report/refresh lai sau.
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardPolicy());
+        executor.initialize();
+        return executor;
+    }
 }

@@ -116,7 +116,7 @@ class PlaceCacheServiceImpl implements PlaceCacheService {
             current.setRating(rating);
         }
         if (current.getPhotosJson() == null && photosJson != null) {
-            current.setPhotosJson(photosJson);
+            current.markPhotosReady(photosJson);
         }
         if (current.getReviewsJson() == null && reviewsJson != null) {
             current.setReviewsJson(reviewsJson);

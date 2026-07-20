@@ -712,6 +712,15 @@ Hỏi lại người dùng (sinh viên dev này là người ra quyết định 
 
 ## Changelog đồng bộ
 
+### 2026-07-21 — Tự phục hồi ảnh địa điểm
+
+| Thay đổi | Căn cứ (file code) |
+|---|---|
+| `PlaceCache` có vòng đời ảnh riêng: `photosSyncedAt`, `photosStatus` (`PENDING/READY/STALE/REFRESHING/FAILED`), `photoFailureCount` | `module/place/entity/PlaceCache.java`, migration `docs/migrations/2026-07-21-place-photo-refresh.sql` |
+| Frontend báo URL hỏng qua `POST /api/v1/places/{id}/photos/failures`; backend chỉ chấp nhận URL đang thuộc `photos_json`, loại URL đó và claim refresh atomic | `PlaceController`, `PlacePhotoServiceImpl`, `PlaceCacheRepository.claimPhotoRefresh` |
+| Worker `photoRefreshExecutor` gọi lại SerpApi bằng `serpDataId`; thành công thay gallery + reset failure, thất bại chuyển `FAILED` | `PlacePhotoRefreshWorker`, `AsyncConfig` |
+| FE dùng cùng một danh sách ảnh khả dụng cho hero/dots/thumbnails/lightbox; hết ảnh thì chỉ render một fallback và polling ngắn khi backend đang refresh | FE `LocationDetail.tsx`, `features/location/photo-gallery.ts`, `hooks/useApi.ts` |
+
 ### 2026-06-11 (đợt 2) — Cá nhân hóa AI, invite link, privacy trip public, guest feed
 
 | Thay đổi | Căn cứ (file code) |

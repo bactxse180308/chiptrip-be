@@ -300,7 +300,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                     if (photos != null && !photos.isEmpty()) {
                         try {
                             photosJsonToSave = objectMapper.writeValueAsString(photos);
-                            cache.setPhotosJson(photosJsonToSave);
+                            cache.markPhotosReady(photosJsonToSave);
                             changed = true;
                         } catch (Exception ex) {
                             log.warn("Failed to serialize hotel photos: {}", ex.getMessage());
@@ -405,7 +405,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             boolean photosWritten = false;
             if (photos != null && !photos.isEmpty()) {
                 try {
-                    entity.setPhotosJson(objectMapper.writeValueAsString(photos));
+                    entity.markPhotosReady(objectMapper.writeValueAsString(photos));
                     photosWritten = true;
                 } catch (Exception ex) {
                     log.warn("Failed to serialize photos list to JSON: {}", ex.getMessage());
@@ -414,7 +414,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             if (!photosWritten && s.thumbnailUrl() != null) {
                 String fallback = buildPhotosJson(s.thumbnailUrl());
                 if (fallback != null) {
-                    entity.setPhotosJson(fallback);
+                    entity.markPhotosReady(fallback);
                 }
             }
 
@@ -475,7 +475,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         if (s.openState() != null) entity.setOpenState(s.openState());
         if (s.hoursText() != null) entity.setHoursText(truncate(s.hoursText(), 255));
         if (s.openingHoursJson() != null) entity.setOpeningHoursJson(s.openingHoursJson());
-        if (s.photosJson() != null) entity.setPhotosJson(s.photosJson());
+        if (s.photosJson() != null) entity.markPhotosReady(s.photosJson());
         if (s.reviewsJson() != null) entity.setReviewsJson(s.reviewsJson());
         if (s.title() != null && (entity.getSerpTitle() == null || entity.getSerpTitle().isBlank())) {
             entity.setSerpTitle(s.title());
@@ -670,6 +670,9 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
         target.setPricePerNightVnd(source.getPricePerNightVnd());
         target.setRating(source.getRating());
         target.setPhotosJson(source.getPhotosJson());
+        target.setPhotosSyncedAt(source.getPhotosSyncedAt());
+        target.setPhotosStatus(source.getPhotosStatus());
+        target.setPhotoFailureCount(source.getPhotoFailureCount());
         target.setReviewsJson(source.getReviewsJson());
     }
 
@@ -785,7 +788,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             // BASIC: chỉ giữ thumbnail (1 ảnh) cho card hiển thị ngay, KHÔNG fetch gallery/reviews.
             // serpEnriched=false + serpSyncedAt=null → enrich nền (FULL) sẽ nâng cấp row này.
             if (toSave.getPhotosJson() == null && best.thumbnailUrl() != null) {
-                toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
+                toSave.markPhotosReady(buildPhotosJson(best.thumbnailUrl()));
             }
             toSave.setSerpEnriched(false);
             toSave.setSerpSyncedAt(null);
@@ -796,11 +799,11 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
             if (dataId != null && !dataId.isBlank() && !pastDeadline(deadline)) {
                 List<Map<String, String>> photos = safeFetchPhotos(dataId);
                 if (!photos.isEmpty()) {
-                    try { toSave.setPhotosJson(objectMapper.writeValueAsString(photos)); }
+                    try { toSave.markPhotosReady(objectMapper.writeValueAsString(photos)); }
                     catch (Exception ex) { log.warn("SerpApi fallback: serialize photos failed: {}", ex.getMessage()); }
                 }
                 if (toSave.getPhotosJson() == null && best.thumbnailUrl() != null) {
-                    toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
+                    toSave.markPhotosReady(buildPhotosJson(best.thumbnailUrl()));
                 }
 
                 List<Map<String, Object>> reviews = pastDeadline(deadline) ? List.of() : safeFetchReviews(dataId);
@@ -809,7 +812,7 @@ class PlaceEnrichmentServiceImpl implements PlaceEnrichmentService {
                     catch (Exception ex) { log.warn("SerpApi fallback: serialize reviews failed: {}", ex.getMessage()); }
                 }
             } else if (best.thumbnailUrl() != null) {
-                toSave.setPhotosJson(buildPhotosJson(best.thumbnailUrl()));
+                toSave.markPhotosReady(buildPhotosJson(best.thumbnailUrl()));
             }
 
             boolean hasBasic = best.rating() != null || best.reviewCount() != null

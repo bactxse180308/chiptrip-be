@@ -1,8 +1,10 @@
 package com.tranbac.chiptripbe.module.place.entity;
 
 import com.tranbac.chiptripbe.common.entity.BaseAuditEntity;
+import com.tranbac.chiptripbe.module.place.enums.PhotoSyncStatus;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.ColumnDefault;
 import org.hibernate.annotations.Nationalized;
 
 import java.math.BigDecimal;
@@ -110,6 +112,23 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "photos_json", columnDefinition = "NVARCHAR(MAX)")
     private String photosJson;
 
+    /** Thoi diem gan nhat dong bo anh thanh cong tu provider. */
+    @Column(name = "photos_synced_at", columnDefinition = "DATETIME2")
+    private LocalDateTime photosSyncedAt;
+
+    /** Trang thai doc lap cua anh, khong phu thuoc trang thai enrich chung. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "photos_status", nullable = false, length = 20)
+    @ColumnDefault("'PENDING'")
+    @Builder.Default
+    private PhotoSyncStatus photosStatus = PhotoSyncStatus.PENDING;
+
+    /** So loi anh lien tiep; reset ve 0 sau mot lan refresh thanh cong. */
+    @Column(name = "photo_failure_count", nullable = false)
+    @ColumnDefault("0")
+    @Builder.Default
+    private int photoFailureCount = 0;
+
     /** JSON array đánh giá thật: [{"author":"...", "avatar":"...", "rating":4.5, "time":"...", "text":"..."}, ...] */
     @Column(name = "reviews_json", columnDefinition = "NVARCHAR(MAX)")
     private String reviewsJson;
@@ -147,4 +166,14 @@ public class PlaceCache extends BaseAuditEntity {
     @Column(name = "serp_enriched", columnDefinition = "bit NOT NULL DEFAULT 0")
     @Builder.Default
     private boolean serpEnriched = false;
+
+    /** Ghi mot bo anh moi tu provider va reset chuoi loi truoc do. */
+    public void markPhotosReady(String photosJson) {
+        this.photosJson = photosJson;
+        if (photosJson != null && !photosJson.isBlank()) {
+            this.photosSyncedAt = LocalDateTime.now();
+            this.photosStatus = PhotoSyncStatus.READY;
+            this.photoFailureCount = 0;
+        }
+    }
 }

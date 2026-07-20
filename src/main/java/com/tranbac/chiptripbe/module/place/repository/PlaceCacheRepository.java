@@ -1,9 +1,11 @@
 package com.tranbac.chiptripbe.module.place.repository;
 
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
+import com.tranbac.chiptripbe.module.place.enums.PhotoSyncStatus;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -11,6 +13,18 @@ import java.util.List;
 import java.util.Optional;
 
 public interface PlaceCacheRepository extends JpaRepository<PlaceCache, Long> {
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+        UPDATE PlaceCache p
+        SET p.photosStatus = :refreshing
+        WHERE p.id = :id
+          AND p.photosStatus IN (:stale, :failed)
+        """)
+    int claimPhotoRefresh(@Param("id") Long id,
+                          @Param("refreshing") PhotoSyncStatus refreshing,
+                          @Param("stale") PhotoSyncStatus stale,
+                          @Param("failed") PhotoSyncStatus failed);
 
     /**
      * Lookup theo cặp (normalizedName, normalizedDestination) — tránh nhầm cùng

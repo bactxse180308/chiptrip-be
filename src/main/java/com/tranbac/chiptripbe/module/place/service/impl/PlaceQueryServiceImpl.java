@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.place.dto.PlaceDto;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
+import com.tranbac.chiptripbe.module.place.enums.PhotoSyncStatus;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
 import com.tranbac.chiptripbe.module.place.service.PlaceQueryService;
 import lombok.RequiredArgsConstructor;
@@ -31,6 +32,11 @@ class PlaceQueryServiceImpl implements PlaceQueryService {
     }
 
     private PlaceDto toDto(PlaceCache p) {
+        List<PlaceDto.PlacePhoto> photos = parsePhotos(p.getPhotosJson());
+        PhotoSyncStatus photoStatus = p.getPhotosStatus();
+        if (photoStatus == null) {
+            photoStatus = photos == null || photos.isEmpty() ? PhotoSyncStatus.PENDING : PhotoSyncStatus.READY;
+        }
         return PlaceDto.builder()
                 .id(p.getId())
                 .name(displayName(p))
@@ -41,7 +47,10 @@ class PlaceQueryServiceImpl implements PlaceQueryService {
                 .reviewCount(p.getReviewCount())
                 .openState(p.getOpenState())
                 .openingHours(parseOpeningHours(p.getOpeningHoursJson()))
-                .photos(parsePhotos(p.getPhotosJson()))
+                .photos(photos)
+                .photosSyncedAt(p.getPhotosSyncedAt())
+                .photosStatus(photoStatus)
+                .photoFailureCount(p.getPhotoFailureCount())
                 .reviews(parseReviews(p.getReviewsJson()))
                 .phone(p.getPhone())
                 .website(p.getWebsite())
