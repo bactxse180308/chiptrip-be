@@ -33,24 +33,32 @@ public class AsyncTripGenerator {
     private final TripService tripService;
     private final SimpMessagingTemplate messagingTemplate;
     private final TripGenerationLock tripGenerationLock;
+    private final TripGenerationStatusTracker tripGenerationStatusTracker;
 
     @Async("tripGenerateExecutor")
-    public void run(Long userId, GenerateTripRequest request) {
+    public void run(Long userId, String generationId, GenerateTripRequest request) {
         try {
             TripGenerateResponse resp = tripService.generateTrip(userId, request);
-            push(userId, TripGenerationResultDto.done(resp.getId(), resp.getGeocodeFailedCount()));
+            complete(userId, TripGenerationResultDto.done(
+                    generationId, resp.getId(), resp.getGeocodeFailedCount()));
         } catch (AppException e) {
             // Lỗi nghiệp vụ đã có message thân thiện (hết lượt, AI lỗi, validate fail...)
             log.warn("Async generate failed for userId={}: {}", userId, e.getMessage());
-            push(userId, TripGenerationResultDto.failed(e.getMessage()));
+            complete(userId, TripGenerationResultDto.failed(generationId, e.getMessage()));
         } catch (Exception e) {
             // Biên worker: phải bắt mọi lỗi còn lại để báo FAILED, tránh để FE kẹt màn loading.
             log.error("Async generate crashed for userId={}", userId, e);
-            push(userId, TripGenerationResultDto.failed(
+            complete(userId, TripGenerationResultDto.failed(generationId,
                     "AI không thể tạo lịch trình lúc này. Vui lòng thử lại sau."));
         } finally {
             tripGenerationLock.release(userId);
         }
+    }
+
+    private void complete(Long userId, TripGenerationResultDto dto) {
+        // Ghi trạng thái trước khi push để polling luôn có nguồn khôi phục nếu WS bị thất lạc.
+        tripGenerationStatusTracker.complete(userId, dto);
+        push(userId, dto);
     }
 
     /** WS push best-effort — lỗi đẩy KHÔNG ảnh hưởng trip đã persist, chỉ log warn. */

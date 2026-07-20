@@ -8,11 +8,13 @@ import com.tranbac.chiptripbe.module.trip.dto.request.UpdateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.response.ShareTokenResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerationStatusDto;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
 import com.tranbac.chiptripbe.module.trip.service.TripExportService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
 import com.tranbac.chiptripbe.module.trip.service.impl.AsyncTripGenerator;
 import com.tranbac.chiptripbe.module.trip.service.impl.TripGenerationLock;
+import com.tranbac.chiptripbe.module.trip.service.impl.TripGenerationStatusTracker;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -28,6 +30,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.UUID;
+
 @Tag(name = "Trips", description = "Quản lý chuyến đi")
 @RestController
 @RequestMapping("/api/v1/trips")
@@ -38,6 +42,7 @@ public class TripController {
     private final TripExportService tripExportService;
     private final AsyncTripGenerator asyncTripGenerator;
     private final TripGenerationLock tripGenerationLock;
+    private final TripGenerationStatusTracker tripGenerationStatusTracker;
 
     @Operation(summary = "Sinh lịch trình bằng AI (trừ 1 lượt AI)")
     @SecurityRequirement(name = "bearerAuth")
@@ -63,18 +68,32 @@ public class TripController {
     @ResponseStatus(HttpStatus.ACCEPTED)
     public ResponseEntity<ApiResponse<Void>> generateTripAsync(
             @AuthenticationPrincipal UserPrincipal principal,
+            @RequestHeader(value = "X-Generation-Id", required = false) String generationId,
             @Valid @RequestBody GenerateTripRequest request) {
         // Validate đồng bộ để fail-fast (402/400/403) + dính rate limit; việc nặng chạy ở luồng nền.
         Long userId = principal.getId();
+        String resolvedGenerationId = generationId == null || generationId.isBlank()
+                ? UUID.randomUUID().toString()
+                : generationId;
         tripService.validateGenerateRequest(userId, request);
         tripGenerationLock.acquire(userId);   // 409 nếu user đang có job generate khác chạy → chống tạo trùng/trừ trùng
+        tripGenerationStatusTracker.markRunning(userId, resolvedGenerationId);
         try {
-            asyncTripGenerator.run(userId, request);
+            asyncTripGenerator.run(userId, resolvedGenerationId, request);
         } catch (RuntimeException e) {
             tripGenerationLock.release(userId);   // submit async thất bại → nhả khóa, không kẹt
+            tripGenerationStatusTracker.clear(userId);
             throw e;
         }
         return ResponseEntity.accepted().body(ApiResponse.noContent());
+    }
+
+    @Operation(summary = "Lấy trạng thái sinh lịch trình bất đồng bộ hiện tại")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/generation-status")
+    public ResponseEntity<ApiResponse<TripGenerationStatusDto>> getGenerationStatus(
+            @AuthenticationPrincipal UserPrincipal principal) {
+        return ResponseEntity.ok(ApiResponse.ok(tripGenerationStatusTracker.getStatus(principal.getId())));
     }
 
     @Operation(summary = "Danh sách chuyến đi của tôi")
