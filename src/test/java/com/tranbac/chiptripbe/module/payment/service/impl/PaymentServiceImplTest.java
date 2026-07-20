@@ -83,6 +83,74 @@ class PaymentServiceImplTest {
         verify(userRepository, never()).addCredits(anyLong(), anyInt());
     }
 
+    // ─── Nhánh KHÔNG cộng lượt (đối chiếu triệu chứng "trả tiền nhưng vẫn Normal") ──────
+
+    @Test
+    void processWebhook_noMatchingOrder_doesNotCredit() {
+        // Nội dung CK không chứa mã đơn hợp lệ → không tìm được order → không cộng.
+        stubPrefix();
+        when(paymentRepo.existsBySepayTransactionId(TX_ID)).thenReturn(false);
+        when(orderRepository.findByOrderCode(ORDER_CODE)).thenReturn(Optional.empty());
+
+        service.processWebhook(payload());
+
+        verify(userRepository, never()).addCredits(anyLong(), anyInt());
+        verify(paymentRepo).save(any());   // vẫn lưu transaction để đối soát (userId=null, credits=0)
+    }
+
+    @Test
+    void processWebhook_amountLessThanRequired_doesNotCredit() {
+        // Chuyển thiếu tiền so với giá gói → skip, không cộng.
+        stubPrefix();
+        when(paymentRepo.existsBySepayTransactionId(TX_ID)).thenReturn(false);
+        when(orderRepository.findByOrderCode(ORDER_CODE)).thenReturn(Optional.of(pendingOrder())); // yêu cầu 10_000
+
+        SepayWebhookPayload underpaid = payload();
+        underpaid.setTransferAmount(5_000L);
+        service.processWebhook(underpaid);
+
+        verify(userRepository, never()).addCredits(anyLong(), anyInt());
+    }
+
+    @Test
+    void processWebhook_orderAlreadySettled_doesNotCredit() {
+        // Order đã PAID trước đó → không cộng lần 2.
+        stubPrefix();
+        when(paymentRepo.existsBySepayTransactionId(TX_ID)).thenReturn(false);
+        PaymentOrder settled = pendingOrder();
+        settled.setStatus(OrderStatus.PAID);
+        when(orderRepository.findByOrderCode(ORDER_CODE)).thenReturn(Optional.of(settled));
+
+        service.processWebhook(payload());
+
+        verify(userRepository, never()).addCredits(anyLong(), anyInt());
+    }
+
+    @Test
+    void processWebhook_testWebhookIdZero_ignoredBeforeAnyLookup() {
+        // Nút "Test" trên dashboard SePay gửi id=0 → coi là test, bỏ qua hoàn toàn.
+        SepayWebhookPayload test = payload();
+        test.setId(0L);
+
+        service.processWebhook(test);
+
+        verify(paymentRepo, never()).existsBySepayTransactionId(anyLong());
+        verify(userRepository, never()).addCredits(anyLong(), anyInt());
+        verify(paymentRepo, never()).save(any());
+    }
+
+    @Test
+    void processWebhook_nonInboundTransfer_ignored() {
+        // Giao dịch tiền RA (transferType != "in") → bỏ qua.
+        SepayWebhookPayload outbound = payload();
+        outbound.setTransferType("out");
+
+        service.processWebhook(outbound);
+
+        verify(userRepository, never()).addCredits(anyLong(), anyInt());
+        verify(paymentRepo, never()).save(any());
+    }
+
     // ─── helpers ──────────────────────────────────────────────────────────────
 
     private void stubPrefix() {
