@@ -55,6 +55,7 @@ class StatsServiceImpl implements StatsService {
         LocalDateTime endOfMonth = currentMonth.atEndOfMonth().atTime(LocalTime.MAX);
 
         long totalOrders = paymentOrderRepository.countByStatus(OrderStatus.PAID);
+        Long revenueVndTotal = paymentOrderRepository.sumAmountVndByStatus(OrderStatus.PAID);
         Long revenueVndThisMonth = paymentOrderRepository.sumAmountVndByStatusAndPaidAtBetween(
                 OrderStatus.PAID,
                 startOfMonth,
@@ -74,6 +75,7 @@ class StatsServiceImpl implements StatsService {
                 .totalComments(totalComments)
                 .totalReviews(totalReviews)
                 .totalOrders(totalOrders)
+                .revenueVndTotal(BigDecimal.valueOf(revenueVndTotal != null ? revenueVndTotal : 0L))
                 .revenueVndThisMonth(BigDecimal.valueOf(revenueVndThisMonth != null ? revenueVndThisMonth : 0L))
                 .aiCallsThisMonth(aiCalls)
                 .aiCostUsdThisMonth(aiCost)

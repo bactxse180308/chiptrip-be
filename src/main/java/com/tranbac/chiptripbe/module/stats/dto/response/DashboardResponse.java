@@ -14,6 +14,7 @@ public class DashboardResponse {
     private long totalComments;
     private long totalReviews;
     private long totalOrders;
+    private BigDecimal revenueVndTotal;
     private BigDecimal revenueVndThisMonth;
     private long aiCallsThisMonth;
     private BigDecimal aiCostUsdThisMonth;

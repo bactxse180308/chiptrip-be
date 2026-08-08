@@ -26,6 +26,11 @@ public interface PaymentOrderRepository extends JpaRepository<PaymentOrder, Long
 
     @Query("SELECT COALESCE(SUM(o.amountVnd), 0) " +
            "FROM PaymentOrder o " +
+           "WHERE o.status = :status")
+    Long sumAmountVndByStatus(@Param("status") OrderStatus status);
+
+    @Query("SELECT COALESCE(SUM(o.amountVnd), 0) " +
+           "FROM PaymentOrder o " +
            "WHERE o.status = :status AND o.paidAt >= :from AND o.paidAt <= :to")
     Long sumAmountVndByStatusAndPaidAtBetween(@Param("status") OrderStatus status,
                                               @Param("from") LocalDateTime from,

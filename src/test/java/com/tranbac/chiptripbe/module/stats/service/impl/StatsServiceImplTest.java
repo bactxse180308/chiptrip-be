@@ -50,6 +50,7 @@ class StatsServiceImplTest {
         when(aiUsageRepository.aggregateForPeriod(any(LocalDateTime.class), any(LocalDateTime.class)))
                 .thenReturn(List.<Object[]>of(new Object[]{new BigDecimal("2.00"), 42L}));
         when(paymentOrderRepository.countByStatus(OrderStatus.PAID)).thenReturn(3L);
+        when(paymentOrderRepository.sumAmountVndByStatus(OrderStatus.PAID)).thenReturn(458_000L);
         when(paymentOrderRepository.sumAmountVndByStatusAndPaidAtBetween(
                 eq(OrderStatus.PAID),
                 any(LocalDateTime.class),
@@ -59,8 +60,10 @@ class StatsServiceImplTest {
         DashboardResponse response = service.getDashboard();
 
         assertEquals(3L, response.getTotalOrders());
+        assertEquals(new BigDecimal("458000"), response.getRevenueVndTotal());
         assertEquals(new BigDecimal("158000"), response.getRevenueVndThisMonth());
         verify(paymentOrderRepository).countByStatus(OrderStatus.PAID);
+        verify(paymentOrderRepository).sumAmountVndByStatus(OrderStatus.PAID);
         verify(paymentOrderRepository).sumAmountVndByStatusAndPaidAtBetween(
                 eq(OrderStatus.PAID),
                 any(LocalDateTime.class),
