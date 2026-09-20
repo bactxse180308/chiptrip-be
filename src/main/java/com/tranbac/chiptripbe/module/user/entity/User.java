@@ -21,6 +21,7 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
+@org.hibernate.annotations.DynamicUpdate
 public class User extends BaseAuditEntity {
 
     @Column(name = "email", nullable = false, length = 150)
@@ -123,7 +124,9 @@ public class User extends BaseAuditEntity {
     }
 
     public void addWholeAiCredits(int amount) {
-        setWholeAiCredits(safeCredits() + Math.max(0, amount));
+        if (amount <= 0) throw new IllegalArgumentException("Credit grant must be positive");
+        this.aiCreditUnits = Math.addExact(effectiveAiCreditUnits(), Math.multiplyExact(amount, 100));
+        this.aiCredits = this.aiCreditUnits / 100;
     }
 
     private int safeCredits() {

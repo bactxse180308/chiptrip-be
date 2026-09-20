@@ -88,7 +88,9 @@ class PaymentServiceImpl implements PaymentService {
                 // Cộng paid credit → user TỰ thành Premium vì paidCreditBalance > 0.
                 // KHÔNG nâng ROLE_PREMIUM: role slot dành cho RBAC (USER/ADMIN); premium là
                 // trạng thái suy ra từ paid, tránh desync khi user xài hết paid. Spec Mục 5.8.
-                userRepository.addCredits(order.getUserId(), order.getCredits());
+                if (userRepository.addCredits(order.getUserId(), order.getCredits()) != 1) {
+                    throw com.tranbac.chiptripbe.common.exception.AppException.conflict("Credit grant could not be applied");
+                }
                 creditsGranted = order.getCredits();
                 matchedUserId = order.getUserId();
                 matchedPlan = order.getPlanCode();

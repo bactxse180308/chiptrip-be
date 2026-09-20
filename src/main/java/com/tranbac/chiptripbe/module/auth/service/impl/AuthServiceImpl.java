@@ -35,6 +35,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -62,6 +65,7 @@ class AuthServiceImpl implements AuthService {
     private final EmailService emailService;
     private final MailProperties mailProperties;
     private final GoogleTokenVerifier googleTokenVerifier;
+    private final PlatformTransactionManager transactionManager;
 
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -188,87 +192,97 @@ class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void verifyOtp(VerifyOtpRequest request) {
-        OtpCode.Purpose purpose;
-        try {
-            purpose = OtpCode.Purpose.valueOf(request.getPurpose().toUpperCase());
-        } catch (IllegalArgumentException e) {
-            throw AppException.badRequest("Loại OTP không hợp lệ");
-        }
+        // Return the expected rejection so attempts commit before the HTTP error is raised.
+        String rejection = new TransactionTemplate(transactionManager).execute(status -> {
+            OtpCode.Purpose purpose;
+            try {
+                purpose = OtpCode.Purpose.valueOf(request.getPurpose().toUpperCase());
+            } catch (IllegalArgumentException e) {
+                throw AppException.badRequest("Loại OTP không hợp lệ");
+            }
 
-        OtpCode otp = otpCodeRepository.findTopByEmailAndPurposeOrderByCreatedAtDesc(request.getEmail(), purpose)
-                .orElseThrow(() -> AppException.badRequest("Mã OTP không tồn tại"));
+            OtpCode otp = otpCodeRepository.findTopByEmailAndPurposeOrderByCreatedAtDesc(request.getEmail(), purpose)
+                    .orElseThrow(() -> AppException.badRequest("Mã OTP không tồn tại"));
 
-        if (otp.getUsed()) {
-            throw AppException.badRequest("Mã OTP đã được sử dụng");
-        }
-        if (otp.isExpired()) {
-            throw AppException.badRequest("Mã OTP đã hết hạn");
-        }
-        if (otp.getAttempts() >= 5) {
-            throw AppException.badRequest("Đã nhập sai quá nhiều lần. Vui lòng yêu cầu mã mới.");
-        }
+            if (otp.getUsed()) {
+                throw AppException.badRequest("Mã OTP đã được sử dụng");
+            }
+            if (otp.isExpired()) {
+                throw AppException.badRequest("Mã OTP đã hết hạn");
+            }
+            if (otp.getAttempts() >= 5) {
+                throw AppException.badRequest("Đã nhập sai quá nhiều lần. Vui lòng yêu cầu mã mới.");
+            }
 
-        if (!hashOtp(request.getOtp()).equals(otp.getOtpHash())) {
-            otp.setAttempts(otp.getAttempts() + 1);
+            if (!hashOtp(request.getOtp()).equals(otp.getOtpHash())) {
+                otp.setAttempts(otp.getAttempts() + 1);
+                otpCodeRepository.save(otp);
+                int remaining = 5 - otp.getAttempts();
+                return "Mã OTP không đúng. Còn " + remaining + " lần thử.";
+            }
+
+            otp.setUsed(true);
             otpCodeRepository.save(otp);
-            int remaining = 5 - otp.getAttempts();
-            throw AppException.badRequest("Mã OTP không đúng. Còn " + remaining + " lần thử.");
-        }
 
-        otp.setUsed(true);
-        otpCodeRepository.save(otp);
-
-        if (purpose == OtpCode.Purpose.EMAIL_VERIFICATION) {
-            User user = userRepository.findByEmail(request.getEmail())
-                    .orElseThrow(() -> AppException.notFound("Không tìm thấy tài khoản"));
-            user.setEmailVerified(true);
-            userRepository.save(user);
-            emailVerificationTokenRepository.invalidateAllByUserId(user.getId());
-            log.info("Email verified via OTP for userId={}", user.getId());
-        } else {
-            log.info("OTP verified for purpose: {} email={}", purpose, "[REDACTED]");
-        }
+            if (purpose == OtpCode.Purpose.EMAIL_VERIFICATION) {
+                User user = userRepository.findByEmail(request.getEmail())
+                        .orElseThrow(() -> AppException.notFound("Không tìm thấy tài khoản"));
+                user.setEmailVerified(true);
+                userRepository.save(user);
+                emailVerificationTokenRepository.invalidateAllByUserId(user.getId());
+                log.info("Email verified via OTP for userId={}", user.getId());
+            } else {
+                log.info("OTP verified for purpose: {} email={}", purpose, "[REDACTED]");
+            }
+            return null;
+        });
+        if (rejection != null) throw AppException.badRequest(rejection);
     }
 
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void resetPasswordWithOtp(ResetPasswordWithOtpRequest request) {
-        OtpCode otp = otpCodeRepository
-                .findTopByEmailAndPurposeOrderByCreatedAtDesc(request.getEmail(), OtpCode.Purpose.PASSWORD_RESET)
-                .orElseThrow(() -> AppException.badRequest("Mã OTP không tồn tại"));
+        // Return the expected rejection so attempts commit before the HTTP error is raised.
+        String rejection = new TransactionTemplate(transactionManager).execute(status -> {
+            OtpCode otp = otpCodeRepository
+                    .findTopByEmailAndPurposeOrderByCreatedAtDesc(request.getEmail(), OtpCode.Purpose.PASSWORD_RESET)
+                    .orElseThrow(() -> AppException.badRequest("Mã OTP không tồn tại"));
 
-        if (otp.getUsed()) {
-            throw AppException.badRequest("Mã OTP đã được sử dụng");
-        }
-        if (otp.isExpired()) {
-            throw AppException.badRequest("Mã OTP đã hết hạn");
-        }
-        if (otp.getAttempts() >= 5) {
-            throw AppException.badRequest("Đã nhập sai quá nhiều lần. Vui lòng yêu cầu mã mới.");
-        }
+            if (otp.getUsed()) {
+                throw AppException.badRequest("Mã OTP đã được sử dụng");
+            }
+            if (otp.isExpired()) {
+                throw AppException.badRequest("Mã OTP đã hết hạn");
+            }
+            if (otp.getAttempts() >= 5) {
+                throw AppException.badRequest("Đã nhập sai quá nhiều lần. Vui lòng yêu cầu mã mới.");
+            }
 
-        if (!hashOtp(request.getOtp()).equals(otp.getOtpHash())) {
-            otp.setAttempts(otp.getAttempts() + 1);
+            if (!hashOtp(request.getOtp()).equals(otp.getOtpHash())) {
+                otp.setAttempts(otp.getAttempts() + 1);
+                otpCodeRepository.save(otp);
+                int remaining = 5 - otp.getAttempts();
+                return "Mã OTP không đúng. Còn " + remaining + " lần thử.";
+            }
+
+            otp.setUsed(true);
             otpCodeRepository.save(otp);
-            int remaining = 5 - otp.getAttempts();
-            throw AppException.badRequest("Mã OTP không đúng. Còn " + remaining + " lần thử.");
-        }
 
-        otp.setUsed(true);
-        otpCodeRepository.save(otp);
+            User user = userRepository.findByEmail(request.getEmail())
+                    .orElseThrow(() -> AppException.notFound("Không tìm thấy tài khoản"));
+            user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
+            userRepository.save(user);
 
-        User user = userRepository.findByEmail(request.getEmail())
-                .orElseThrow(() -> AppException.notFound("Không tìm thấy tài khoản"));
-        user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
-        userRepository.save(user);
+            List<RefreshToken> activeTokens = refreshTokenRepository.findAllByUserId(user.getId());
+            activeTokens.forEach(t -> t.setRevoked(true));
+            refreshTokenRepository.saveAll(activeTokens);
 
-        List<RefreshToken> activeTokens = refreshTokenRepository.findAllByUserId(user.getId());
-        activeTokens.forEach(t -> t.setRevoked(true));
-        refreshTokenRepository.saveAll(activeTokens);
-
-        log.info("Password reset via OTP for userId={}", user.getId());
+            log.info("Password reset via OTP for userId={}", user.getId());
+            return null;
+        });
+        if (rejection != null) throw AppException.badRequest(rejection);
     }
 
     @Override

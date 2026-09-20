@@ -10,6 +10,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class UserTest {
 
     @Test
+    void grantPreservesFractionalUnitsEvenWhenLegacyWholeBalanceIsStale() {
+        User user = User.builder().aiCredits(9).aiCreditUnits(75).build();
+        user.addWholeAiCredits(1);
+        assertEquals(175, user.effectiveAiCreditUnits());
+        assertEquals(1, user.getAiCredits());
+    }
+
+    @Test
     void newUser_defaultsToNormal_noPaidCredits() {
         // Giống AuthServiceImpl.register / google login: builder không set credits.
         User user = User.builder().email("new@e.com").fullName("New").build();

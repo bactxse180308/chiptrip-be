@@ -445,57 +445,338 @@ Orchestration ở `TripServiceImpl.generateTrip` (`module/trip/service/impl/Trip
 `@Transactional(readOnly=true)`, tránh giữ DB connection trong khi gọi Gemini (HTTP dài) và geocode.
 
 ```
-Client → POST /trips/generate (input)
+Client
+   │
+   │ POST /api/v1/trips/generate
+   ▼
+TripController.generateTrip()
+   │
+   ├── lấy userId từ UserPrincipal
+   │
+   ├── TripGenerationLock.acquire(userId)
+   │     └── nếu user đang generate sync/async khác
+   │         → 409 Conflict
    │
    ▼
-TripServiceImpl.generateTrip()           (orchestration, KHÔNG @Transactional)
+TripServiceImpl.generateTrip()
+@Transactional(propagation = NOT_SUPPORTED)
+→ orchestration, KHÔNG giữ DB transaction trong lúc gọi external API
    │
-   ├── 1. validateRequestAndCredits      (read-only tx ngắn)
-   │       - findById(user); throw nếu aiCredits <= 0
-   │       - dateStart >= today; dateEnd >= dateStart
+   ├── 1. validateRequestAndCredits(userId, request)
+   │       │
+   │       ├── userRepository.findById(userId)
+   │       │
+   │       ├── kiểm tra giới hạn tier
+   │       │     - maxTripDays
+   │       │     - maxStyles
+   │       │
+   │       ├── kiểm tra còn credit
+   │       │     - paid credit >= 100 units
+   │       │       HOẶC
+   │       │     - còn daily trial
+   │       │
+   │       ├── validate ngày
+   │       │     - startDate >= hôm nay (Asia/Ho_Chi_Minh)
+   │       │     - endDate >= startDate
+   │       │
+   │       └── return User.preferences
    │
-   ├── 2. AiService.generateItinerary    (NGOÀI transaction — gọi Gemini ~5-30s)
-   │       AiGenerateServiceImpl:
-   │       - Build system + user prompt (tiếng Việt, ép tên địa điểm thật)
-   │       - responseMimeType=application/json + responseSchema strict
-   │       - thinkingConfig.thinkingBudget=0 (tắt CoT của 2.5-flash, tránh timeout)
-   │       - retry tối đa max-retries (mặc định 2) nếu 429/5xx/timeout/JSON parse fail
-   │       - throw badRequest cho 400/401/403 (không retry)
    │
-   ├── 3. AiItineraryValidator.validate  (fail-fast — không persist trip rác)
-   │       - Đủ số ngày, dayNumber duy nhất, date trong range
-   │       - Mỗi activity: name/time/type hợp lệ, costVnd >= 0
-   │       - Geocodable type (FOOD/ATTRACTION/ACCOMMODATION/TRANSPORT) phải có searchQuery,
-   │         KHÔNG được generic ("nhà hàng địa phương", "khách sạn trung tâm"...)
-   │       - Tổng cost ≤ budget × 1.10 hoặc ≤ budget + 1.000.000đ
+   ├── 2. aiService.generateItinerary(request, userPreferences)
+   │       │
+   │       ▼
+   │   AiGenerateServiceImpl.generateItinerary()
+   │       │
+   │       ├── buildRequest()
+   │       │     │
+   │       │     ├── build system prompt
+   │       │     │     - địa điểm thật
+   │       │     │     - searchQuery cụ thể
+   │       │     │     - costVnd
+   │       │     │     - FOOD / ATTRACTION /
+   │       │     │       TRANSPORT / ACCOMMODATION / OTHER
+   │       │     │
+   │       │     ├── build user prompt
+   │       │     │     - departure / destination
+   │       │     │     - ngày đi / ngày về
+   │       │     │     - số người
+   │       │     │     - budget
+   │       │     │     - styles
+   │       │     │     - tripType
+   │       │     │     - departureTime / returnTime
+   │       │     │     - tickets
+   │       │     │     - User.preferences
+   │       │     │
+   │       │     └── OpenAI-compatible
+   │       │           POST /chat/completions
+   │       │           response_format = json_object
+   │       │
+   │       ├── callLlm()
+   │       │     │
+   │       │     ├── key lỗi/quota 401/403/429
+   │       │     │     → rotate AI key
+   │       │     │
+   │       │     ├── 503 high demand
+   │       │     │     → wait + retry bằng busy retry budget
+   │       │     │
+   │       │     ├── timeout / connection / 5xx /
+   │       │     │   JSON lỗi
+   │       │     │     → content retry
+   │       │     │
+   │       │     └── HTTP 400
+   │       │           → non-retryable
+   │       │
+   │       ├── extractContent()
+   │       │
+   │       ├── parseJson()
+   │       │     │
+   │       │     ▼
+   │       │   AiItineraryResult
+   │       │     ├── title
+   │       │     ├── days[]
+   │       │     │    └── activities[]
+   │       │     └── checklist[]
+   │       │
+   │       ├── ★ AiItineraryValidator.validate()
+   │       │     │
+   │       │     ├── title phải nhắc destination
+   │       │     ├── đúng số ngày
+   │       │     ├── dayNumber không trùng
+   │       │     ├── date nằm trong trip range
+   │       │     ├── >= 3 activities/ngày
+   │       │     ├── name/time/type hợp lệ
+   │       │     ├── costVnd âm → normalize thành 0
+   │       │     ├── searchQuery generic → INVALID
+   │       │     │
+   │       │     │   Lưu ý:
+   │       │     │   searchQuery null/blank
+   │       │     │   KHÔNG fail toàn itinerary
+   │       │     │
+   │       │     ├── tổng cost <=
+   │       │     │   budget + max(10%, 1.000.000đ)
+   │       │     └── checklist không được rỗng
+   │       │
+   │       │     nếu validation fail
+   │       │     → AiRetryableException
+   │       │     → gọi AI lại nếu còn retry
+   │       │
+   │       └── return AiCallResult
+   │             ├── itinerary
+   │             ├── promptTokens
+   │             └── completionTokens
    │
-   ├── 4. resolvePlaces                  (HTTP calls Goong + SerpApi, fail-soft per activity)
-   │       - Geocode destination/departure thành GeoAnchor để validate vùng theo GPS
-   │       - Dedup các activity geocodable theo canonicalKey(searchQuery) trước khi fan-out
-   │       Với mỗi group geocodable:
-   │       - PlaceEnrichmentService.resolvePlace(searchQuery, destination, anchors, deadline)
-   │           - PlaceCache lookup theo normalizedName + normalizedDestination
-   │           - Cache miss → GoongClient.forwardGeocode V2 (has_vnid), validate theo address/anchor/province
-   │           - Goong miss/mismatch → fallback SerpApi Google Maps nếu candidate vẫn đúng vùng
-   │           - SerpApi enrich (rating/ảnh/giờ/reviews), bỏ qua external call còn lại nếu quá deadline
-   │           - Upsert PlaceCache trong tx ngắn riêng
-   │       - Nếu ACCOMMODATION: enrichAccommodation (SerpApi Google Hotels) lấy
-   │         pricePerNightVnd + bookingUrl theo check-in/out của group khách sạn đó
-   │       - Exception cho 1 group → log warn, skip, trip vẫn được tạo
+   │
+   ├── 3. resolvePlaces(aiCallResult.itinerary(), request)
+   │       │
+   │       ├── duyệt tất cả AiActivity
+   │       │
+   │       ├── chỉ xử lý:
+   │       │     FOOD
+   │       │     ATTRACTION
+   │       │     ACCOMMODATION
+   │       │     TRANSPORT
+   │       │
+   │       ├── searchQuery null/blank
+   │       │     → skip geocode
+   │       │
+   │       ▼
+   │   resolveAllPlacesParallel()
+   │       │
+   │       ├── geocodeAnchor(destination)
+   │       ├── geocodeAnchor(departure)
+   │       │
+   │       ├── dedup activity theo
+   │       │     canonicalKey(searchQuery)
+   │       │
+   │       ├── deadline foreground ≈ 55 giây
+   │       │
+   │       └── fan-out song song từng place group
+   │             │
+   │             ├── xác định strategy
+   │             │
+   │             │   FOOD / ATTRACTION
+   │             │   → preferSerpIdentity = true
+   │             │
+   │             │   TRANSPORT / ACCOMMODATION
+   │             │   → Goong-first
+   │             │
+   │             ├── xác định EnrichmentDepth
+   │             │
+   │             │   ngày 1
+   │             │   → FULL
+   │             │
+   │             │   ngày 2..N
+   │             │   → BASIC
+   │             │
+   │             │   ACCOMMODATION
+   │             │   → luôn FULL
+   │             │
+   │             ▼
+   │       PlaceEnrichmentService.resolvePlace(...)
+   │       @Transactional(NOT_SUPPORTED)
+   │             │
+   │             ├── normalize place name
+   │             │
+   │             ├── PlaceCache lookup
+   │             │
+   │             │
+   │             ├── cache hit
+   │             │   → return PlaceCache
+   │             │
+   │             ├── nếu preferSerpIdentity
+   │             │   → SerpApi-first
+   │             │
+   │             ├── nếu chưa resolve
+   │             │   → Goong forward geocode
+   │             │
+   │             ├── validate vùng bằng
+   │             │     - destination/address
+   │             │     - GeoAnchor GPS
+   │             │     - province
+   │             │
+   │             ├── Goong miss/mismatch
+   │             │   → SerpApi fallback
+   │             │
+   │             ├── dedup bằng goongPlaceId
+   │             │
+   │             ├── BASIC
+   │             │   → chủ yếu lat/lng/address
+   │             │
+   │             ├── FULL
+   │             │   → rating/photos/reviews/...
+   │             │
+   │             └── PlaceCacheService.save()
+   │                   → transaction DB ngắn riêng
+   │
+   │             nếu ACCOMMODATION
+   │             │
+   │             └── enrichAccommodation()
+   │                   └── SerpApi Google Hotels
+   │                         - pricePerNightVnd
+   │                         - bookingUrl
+   │                         - rating
+   │                         - photos/reviews
+   │
+   │       Foreground:
+   │       allowScraper = false
+   │
+   │       → không đợi scraper chậm
+   │
+   │       Exception/miss của một place
+   │       → fail-soft
+   │       → KHÔNG fail cả trip
+   │
+   │
+   ├── 4. tạo ResolveOutcome
+   │       │
+   │       ├── resolved
+   │       │     Map<AiActivity, PlaceCache>
+   │       │
+   │       └── backgroundJob
+   │             nếu còn place cần FULL enrichment
+   │
+   │
+   ├── 5. TripGenerationPersistenceService
+   │       .persistGeneratedTrip(...)
+   │
+   │       ▼
+   │   TripGenerationPersistenceServiceImpl
+   │   @Transactional
+   │       │
+   │       ├── reload User
+   │       │
+   │       ├── buildAndSaveTrip()
+   │       │     - save Trip
+   │       │     - enrichmentPending =
+   │       │       needsBackgroundEnrichment
+   │       │
+   │       ├── tripMemberService.seedOwner()
+   │       │     → TripMember OWNER
+   │       │
+   │       ├── với mỗi AiDay
+   │       │     │
+   │       │     ├── save TripDay
+   │       │     │
+   │       │     └── với mỗi AiActivity
+   │       │           │
+   │       │           ├── lấy PlaceCache đã resolve
+   │       │           ├── lat/lng
+   │       │           ├── placeId
+   │       │           ├── address
+   │       │           ├── placeCacheId
+   │       │           ├── imageUrl nếu đã FULL
+   │       │           ├── bookingUrl
+   │       │           │
+   │       │           ├── ACCOMMODATION:
+   │       │           │   nếu có pricePerNightVnd
+   │       │           │   → override costVnd
+   │       │           │
+   │       │           └── save Activity
+   │       │
+   │       ├── save ChecklistItem[]
+   │       │
+   │       ├── save AiUsage
+   │       │     - model/provider từ config
+   │       │     - promptTokens
+   │       │     - completionTokens
+   │       │     - costUsd
+   │       │
+   │       ├── ★ CreditService.consumeForGenerate(userId)
+   │       │     │
+   │       │     ├── grant daily trial nếu cần
+   │       │     │
+   │       │     ├── thử trừ 100 PAID units trước
+   │       │     │
+   │       │     ├── paid không đủ
+   │       │     │   → thử trừ TRIAL
+   │       │     │
+   │       │     └── cả hai đều hết
+   │       │           → 402
+   │       │           → rollback toàn bộ transaction
+   │       │
+   │       ├── sync aiCredits display value
+   │       │
+   │       ├── nếu source = PAID
+   │       │   và remainingUnits <= 100
+   │       │   → publish AiCreditsLowEvent
+   │       │
+   │       └── return TripGenerateResponse
+   │
+   │
+   ├── 6. transaction persist COMMIT
+   │
+   │
+   ├── 7. nếu còn enrichmentPending
+   │       │
+   │       └── submit backgroundEnrichmentExecutor
+   │             │
+   │             ├── claim trip enrichment
+   │             ├── FULL enrich các place còn thiếu
+   │             ├── ngày 2..N được nâng BASIC → FULL
+   │             ├── place foreground miss cũng được retry
+   │             ├── update Activity location nếu cần
+   │             │
+   │             ├── hoàn thành hết
+   │             │   → enrichmentPending = false
+   │             │
+   │             └── chưa hoàn thành
+   │                 → schedule retry
+   │
+   │       nếu background job bị mất/app restart
+   │       → TripEnrichmentScheduler /
+   │         sweepPendingEnrichments()
+   │         sẽ quét lại từ DB
    │
    ▼
-TripGenerationPersistenceServiceImpl.persistGeneratedTrip   (@Transactional — 1 tx ngắn)
-   ├── Re-load user + RE-CHECK aiCredits (chống race với generate khác)
-   ├── Save Trip
-   ├── seedOwner (TripMember OWNER cho user)
-   ├── Với mỗi day → save TripDay → save Activity (gán lat/lng/placeId/placeCacheId
-   │   từ PlaceCache nếu resolve được; nếu ACCOMMODATION có pricePerNightVnd thì override cost)
-   ├── Save ChecklistItem
-   ├── ★ TRỪ aiCredits SAU KHI persist thành công ★
-   │   - Nếu Gemini lỗi nặng / validate fail → đã throw từ trước, user KHÔNG mất lượt
-   │   - Nếu remainingCredits <= 1 → publishEvent(AiCreditsLowEvent) → noti listener
-   ├── Log AiUsage (provider="gemini", tokensIn/out, costUsd theo pricing)
-   └── return TripGenerateResponse
+return TripGenerateResponse
+   │
+   ▼
+TripController
+   │
+   ├── HTTP 201 Created
+   │
+   └── finally
+         TripGenerationLock.release(userId)
 ```
 
 **Vì sao trừ credit SAU khi persist thành công (khác sơ đồ tài liệu cũ)?**

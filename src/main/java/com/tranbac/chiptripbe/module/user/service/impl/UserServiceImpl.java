@@ -303,10 +303,17 @@ class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public UserResponse adminGrantCredits(Long userId, GrantCreditsRequest request) {
+        if (request.getAmount() == null || request.getAmount() <= 0 || request.getAmount() > 21474836) {
+            throw AppException.badRequest("Số lượng credit không hợp lệ");
+        }
+        if (userRepository.addCredits(userId, request.getAmount()) != 1) {
+            if (!userRepository.existsById(userId)) {
+                throw AppException.notFound("Không tìm thấy người dùng");
+            }
+            throw AppException.conflict("Số dư credit vượt giới hạn cho phép");
+        }
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy người dùng"));
-        user.addWholeAiCredits(request.getAmount());
-        userRepository.save(user);
         log.info("Admin granted {} credits to userId={}", request.getAmount(), userId);
         return toResponse(user);
     }

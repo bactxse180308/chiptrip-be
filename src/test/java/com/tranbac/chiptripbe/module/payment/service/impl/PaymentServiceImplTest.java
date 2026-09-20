@@ -1,6 +1,7 @@
 package com.tranbac.chiptripbe.module.payment.service.impl;
 
 import com.tranbac.chiptripbe.module.payment.config.SepayProperties;
+import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.payment.dto.SepayWebhookPayload;
 import com.tranbac.chiptripbe.module.payment.entity.OrderStatus;
 import com.tranbac.chiptripbe.module.payment.entity.PaymentOrder;
@@ -25,6 +26,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Webhook SePay sau khi BỎ nâng ROLE_PREMIUM: vẫn cộng paid credit đúng 1 lần & idempotent.
@@ -49,6 +51,7 @@ class PaymentServiceImplTest {
     @Test
     void processWebhook_validPayment_addsPaidCreditOnce() {
         stubPrefix();
+        when(userRepository.addCredits(USER_ID, 1)).thenReturn(1);
         when(paymentRepo.existsBySepayTransactionId(TX_ID)).thenReturn(false);
         when(orderRepository.findByOrderCode(ORDER_CODE)).thenReturn(Optional.of(pendingOrder()));
         when(orderRepository.markPaidIfPending(eq(ORDER_ID), any(LocalDateTime.class), eq(TX_ID),
@@ -58,6 +61,17 @@ class PaymentServiceImplTest {
 
         verify(userRepository).addCredits(USER_ID, 1);   // +1 credit = +100 units (gói PREMIUM)
         verify(paymentRepo).save(any());
+    }
+
+    @Test
+    void processWebhook_rejectedCreditGrantRaisesErrorInsteadOfRecordingSuccess() {
+        stubPrefix();
+        when(orderRepository.findByOrderCode(ORDER_CODE)).thenReturn(Optional.of(pendingOrder()));
+        when(orderRepository.markPaidIfPending(eq(ORDER_ID), any(LocalDateTime.class), eq(TX_ID),
+                eq(OrderStatus.PAID), eq(OrderStatus.PENDING))).thenReturn(1);
+        when(userRepository.addCredits(USER_ID, 1)).thenReturn(0);
+        assertThrows(AppException.class, () -> service.processWebhook(payload()));
+        verify(paymentRepo, never()).save(any());
     }
 
     @Test

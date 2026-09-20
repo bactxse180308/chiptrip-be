@@ -1,5 +1,7 @@
 package com.tranbac.chiptripbe.common.security;
 
+import com.tranbac.chiptripbe.common.util.RequestLogPath;
+
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -9,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -35,19 +38,25 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
         String token = header.substring(7);
         if (!jwtProvider.isTokenValid(token)) {
-            log.warn("JWT invalid/expired [{} {}]", request.getMethod(), request.getRequestURI());
+            log.warn("JWT invalid/expired [{} {}]", request.getMethod(), RequestLogPath.of(request));
             filterChain.doFilter(request, response);
             return;
         }
 
         String email = jwtProvider.getEmail(token);
         if (email != null && SecurityContextHolder.getContext().getAuthentication() == null) {
-            UserDetails userDetails = userDetailsService.loadUserByUsername(email);
-            UsernamePasswordAuthenticationToken auth =
-                    new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
-            auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-            SecurityContextHolder.getContext().setAuthentication(auth);
-            log.debug("JWT auth OK: {} [{} {}]", email, request.getMethod(), request.getRequestURI());
+            try {
+                UserDetails userDetails = userDetailsService.loadUserByUsername(email);
+                if (userDetails.isEnabled() && userDetails.isAccountNonLocked()
+                        && userDetails.isAccountNonExpired() && userDetails.isCredentialsNonExpired()) {
+                    UsernamePasswordAuthenticationToken auth =
+                            new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
+                    auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                    SecurityContextHolder.getContext().setAuthentication(auth);
+                }
+            } catch (AuthenticationException ex) {
+                SecurityContextHolder.clearContext();
+            }
         }
 
         filterChain.doFilter(request, response);

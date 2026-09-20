@@ -18,6 +18,8 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
 
     boolean existsByEmail(String email);
 
+    boolean existsByIdAndIsActiveTrue(Long id);
+
     Optional<User> findByOauthProviderAndOauthProviderId(com.tranbac.chiptripbe.common.enums.OAuthProvider provider, String oauthProviderId);
 
     List<User> findAllByRole_NameAndIsActiveTrue(String roleName);
@@ -73,8 +75,9 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
 
     /** Cộng credits atomic (nạp tiền qua webhook). Trả số dòng affected. */
     @Modifying(clearAutomatically = true)
-    @Query("UPDATE User u SET u.aiCredits = u.aiCredits + :amount, " +
-           "u.aiCreditUnits = COALESCE(u.aiCreditUnits, u.aiCredits * 100) + (:amount * 100) " +
-           "WHERE u.id = :userId")
+    @Query("UPDATE User u SET u.aiCredits = cast((COALESCE(u.aiCreditUnits, u.aiCredits * 100) + (:amount * 100)) / 100 as integer), " +
+            "u.aiCreditUnits = COALESCE(u.aiCreditUnits, u.aiCredits * 100) + (:amount * 100) " +
+            "WHERE u.id = :userId AND :amount > 0 AND :amount <= 21474836 " +
+            "AND COALESCE(u.aiCreditUnits, u.aiCredits * 100) <= 2147483647 - (:amount * 100)")
     int addCredits(@Param("userId") Long userId, @Param("amount") int amount);
 }

@@ -13,8 +13,7 @@ public class TripPublicSummaryResponse {
     private Long id;
     private String title;
     private String destination;
-    private LocalDate dateStart;
-    private LocalDate dateEnd;
+    private Long durationDays;
     private Integer peopleCount;
     /** imageUrl của activity đầu tiên có ảnh. */
     private String thumbnailUrl;

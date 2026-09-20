@@ -199,6 +199,120 @@ class TripServiceImplTest {
     // ─── helpers ──────────────────────────────────────────────────────────────
 
     @Test
+    void publicTripDoesNotExposeOwnerOnlyFieldsOrExactDates() {
+        Trip trip = privacyTrip();
+        when(tripRepository.findById(77L)).thenReturn(Optional.of(trip));
+        stubPrivacyItinerary(trip);
+        var json = tools.jackson.databind.json.JsonMapper.builder().build().valueToTree(service.getPublicTrip(77L));
+        for (String key : List.of("shareToken", "members", "checklist", "dateStart", "dateEnd", "budgetVnd", "status")) {
+            org.junit.jupiter.api.Assertions.assertFalse(json.has(key), "Public field leaked: " + key);
+        }
+        org.junit.jupiter.api.Assertions.assertFalse(json.path("user").has("email"));
+        org.junit.jupiter.api.Assertions.assertFalse(json.path("days").get(0).has("date"));
+        org.junit.jupiter.api.Assertions.assertFalse(json.path("days").get(0).path("activities").get(0).has("bookingUrl"));
+        verify(tripMemberRepository, never()).findByTripIdWithUser(anyLong());
+        verify(checklistItemRepository, never()).findByTripIdOrderByDisplayOrder(anyLong());
+    }
+
+    @Test
+    void sharedTripUsesReadOnlyProjectionButRetainsScheduledDates() {
+        Trip trip = privacyTrip();
+        String token = TripShareTokens.create();
+        trip.setShareToken(token);
+        stubPrivacyItinerary(trip);
+        when(tripRepository.findByShareToken(token)).thenReturn(Optional.of(trip));
+        var json = tools.jackson.databind.json.JsonMapper.builder().build().valueToTree(service.getSharedTrip(token));
+        for (String key : List.of("shareToken", "members", "checklist")) {
+            org.junit.jupiter.api.Assertions.assertFalse(json.has(key), "Shared field leaked: " + key);
+        }
+        org.junit.jupiter.api.Assertions.assertFalse(json.path("user").has("email"));
+        assertTrue(json.hasNonNull("dateStart"));
+        assertTrue(json.path("days").get(0).hasNonNull("date"));
+    }
+
+    @Test
+    void shareRotationAndRevocationRemainOwnerOnly() {
+        Trip trip = privacyTrip();
+        when(tripRepository.findById(77L)).thenReturn(Optional.of(trip));
+        assertThrows(AppException.class, () -> service.enableShare(2L, 77L));
+        String first = service.enableShare(USER_ID, 77L).getShareToken();
+        assertTrue(TripShareTokens.isCurrent(first));
+        String second = service.enableShare(USER_ID, 77L).getShareToken();
+        org.junit.jupiter.api.Assertions.assertNotEquals(first, second);
+        assertEquals(second, trip.getShareToken());
+        service.disableShare(USER_ID, 77L);
+        org.junit.jupiter.api.Assertions.assertNull(trip.getShareToken());
+    }
+
+    @Test
+    void privateTripIsNotPublicAndOwnerDetailRetainsOwnerFields() {
+        Trip trip = privacyTrip();
+        trip.setPublic(false);
+        trip.setShareToken(TripShareTokens.create());
+        when(tripRepository.findById(77L)).thenReturn(Optional.of(trip));
+        assertThrows(AppException.class, () -> service.getPublicTrip(77L));
+        var owner = service.getTripDetail(USER_ID, 77L);
+        assertEquals(trip.getShareToken(), owner.getShareToken());
+        assertEquals(trip.getDateStart(), owner.getDateStart());
+        assertEquals("private@example.com", owner.getUser().getEmail());
+        assertThrows(AppException.class, () -> service.getTripDetail(2L, 77L));
+    }
+
+    private void stubPrivacyItinerary(Trip trip) {
+        var day = TripDay.builder().trip(trip).dayNumber(1).date(trip.getDateStart()).build();
+        day.setId(3L);
+        var activity = Activity.builder().day(day).name("Visit").costVnd(10000L)
+                .bookingUrl("https://example.com/private-quote").build();
+        when(tripDayRepository.findByTripIdOrderByDayNumber(77L)).thenReturn(List.of(day));
+        when(activityRepository.findByTripIdWithDayOrderByDayAndOrder(77L)).thenReturn(List.of(activity));
+    }
+
+    @Test
+    void legacyShareTokensAreRejectedWithoutDatabaseLookup() {
+        assertThrows(AppException.class, () -> service.getSharedTrip("0123456789abcdef0123456789abcdef"));
+        verify(tripRepository, never()).findByShareToken(anyString());
+    }
+
+    @Test
+    void publicCloneDoesNotCopyPrivateChecklistDatesBudgetOrBookingUrl() {
+        Trip source = privacyTrip();
+        source.setBudgetVnd(9999999L);
+        var day = TripDay.builder().trip(source).dayNumber(1).date(source.getDateStart()).build();
+        day.setId(3L);
+        var activity = Activity.builder().day(day).name("Visit").bookingUrl("https://example.com/private-quote").build();
+        day.setActivities(List.of(activity));
+        source.setDays(List.of(day));
+        source.setChecklist(List.of(com.tranbac.chiptripbe.module.trip.entity.ChecklistItem.builder().name("Private note").build()));
+        User cloner = normalUser();
+        cloner.setId(2L);
+        when(tripRepository.findById(77L)).thenReturn(Optional.of(source));
+        when(userRepository.findById(2L)).thenReturn(Optional.of(cloner));
+        when(tripRepository.save(any())).thenAnswer(inv -> {
+            Trip copy = inv.getArgument(0); copy.setId(88L); return copy;
+        });
+        when(tripDayRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        service.cloneTrip(2L, 77L);
+        var clone = ArgumentCaptor.forClass(Trip.class);
+        verify(tripRepository).save(clone.capture());
+        assertEquals(LocalDate.now(VN), clone.getValue().getDateStart());
+        assertEquals(0L, clone.getValue().getBudgetVnd());
+        var copiedActivity = ArgumentCaptor.forClass(Activity.class);
+        verify(activityRepository).save(copiedActivity.capture());
+        org.junit.jupiter.api.Assertions.assertNull(copiedActivity.getValue().getBookingUrl());
+        verify(checklistItemRepository, never()).save(any());
+    }
+
+    private Trip privacyTrip() {
+        User owner = normalUser();
+        owner.setEmail("private@example.com");
+        Trip trip = Trip.builder().user(owner).title("Public itinerary").destination("Da Nang")
+                .isPublic(true).shareToken("secret").dateStart(LocalDate.of(2026, 10, 1))
+                .dateEnd(LocalDate.of(2026, 10, 3)).build();
+        trip.setId(77L);
+        return trip;
+    }
+
+    @Test
     void generateTrip_foregroundResolveAlwaysDisablesScraper() {
         LocalDate start = LocalDate.now(VN);
         GenerateTripRequest req = request(start, start.plusDays(1), List.of("food_tour"));

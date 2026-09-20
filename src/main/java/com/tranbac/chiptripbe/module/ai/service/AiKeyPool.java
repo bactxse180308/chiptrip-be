@@ -36,11 +36,13 @@ public class AiKeyPool {
 
     /** Số lượng key trong pool. */
     public int size() {
+
         return keys.size();
     }
 
     /** Key đang dùng hiện tại (sticky). */
     public String current() {
+
         return keys.get(Math.floorMod(cursor.get(), keys.size()));
     }
 

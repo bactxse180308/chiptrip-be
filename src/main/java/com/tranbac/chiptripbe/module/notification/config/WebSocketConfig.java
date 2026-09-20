@@ -25,6 +25,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtChannelInterceptor jwtChannelInterceptor;
     private final CorsProperties corsProperties;
+    private final WebSocketAccountGuard accountGuard;
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
@@ -44,5 +45,10 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
         registration.interceptors(jwtChannelInterceptor);
+    }
+
+    @Override
+    public void configureClientOutboundChannel(ChannelRegistration registration) {
+        registration.interceptors(accountGuard);
     }
 }

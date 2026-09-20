@@ -1,5 +1,7 @@
 package com.tranbac.chiptripbe.common.filter;
 
+import com.tranbac.chiptripbe.common.util.RequestLogPath;
+
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -27,11 +29,11 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             int status = res.getStatus();
             String pattern = "{} {} → {} ({}ms)";
             if (status >= 500) {
-                log.error(pattern, req.getMethod(), req.getRequestURI(), status, ms);
+                log.error(pattern, req.getMethod(), RequestLogPath.of(req), status, ms);
             } else if (status >= 400) {
-                log.warn(pattern, req.getMethod(), req.getRequestURI(), status, ms);
+                log.warn(pattern, req.getMethod(), RequestLogPath.of(req), status, ms);
             } else {
-                log.debug(pattern, req.getMethod(), req.getRequestURI(), status, ms);
+                log.debug(pattern, req.getMethod(), RequestLogPath.of(req), status, ms);
             }
         }
     }

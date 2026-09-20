@@ -1,5 +1,7 @@
 package com.tranbac.chiptripbe.common.exception;
 
+import com.tranbac.chiptripbe.common.util.RequestLogPath;
+
 import com.tranbac.chiptripbe.common.response.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -20,12 +22,12 @@ public class GlobalExceptionHandler {
     // Client disconnected before response was sent — not a server error
     @ExceptionHandler(AsyncRequestNotUsableException.class)
     public void handleClientAbort(AsyncRequestNotUsableException ex, HttpServletRequest req) {
-        log.debug("Client disconnected [{} {}]: {}", req.getMethod(), req.getRequestURI(), ex.getMessage());
+        log.debug("Client disconnected [{} {}]: {}", req.getMethod(), RequestLogPath.of(req), ex.getMessage());
     }
 
     @ExceptionHandler(AppException.class)
     public ResponseEntity<ErrorResponse> handleApp(HttpServletRequest req, AppException ex) {
-        String path = req.getMethod() + " " + req.getRequestURI();
+        String path = req.getMethod() + " " + RequestLogPath.of(req);
         if (ex.getStatus().is5xxServerError()) {
             log.error("[{}] {} → {}: {}", ex.getStatus().value(), path, ex.getCode(), ex.getMessage());
         } else {
@@ -39,14 +41,14 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleValidation(HttpServletRequest req, MethodArgumentNotValidException ex) {
         Map<String, String> details = ex.getBindingResult().getFieldErrors().stream()
                 .collect(Collectors.toMap(FieldError::getField, FieldError::getDefaultMessage, (a, b) -> a));
-        log.warn("[400] {} {} → VALIDATION_FAILED: {}", req.getMethod(), req.getRequestURI(), details);
+        log.warn("[400] {} {} → VALIDATION_FAILED: {}", req.getMethod(), RequestLogPath.of(req), details);
         return ResponseEntity.badRequest()
                 .body(ErrorResponse.of("VALIDATION_FAILED", "Validation error", details));
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneric(HttpServletRequest req, Exception ex) {
-        log.error("Unhandled exception [{} {}]", req.getMethod(), req.getRequestURI(), ex);
+        log.error("Unhandled exception [{} {}]", req.getMethod(), RequestLogPath.of(req), ex);
         return ResponseEntity.internalServerError()
                 .body(ErrorResponse.of("INTERNAL_ERROR", "An unexpected error occurred", null));
     }

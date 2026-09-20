@@ -1,5 +1,7 @@
 package com.tranbac.chiptripbe.common.security;
 
+import com.tranbac.chiptripbe.common.util.RequestLogPath;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -24,7 +26,7 @@ public class CustomAuthenticationEntryPoint implements AuthenticationEntryPoint 
     @Override
     public void commence(HttpServletRequest request, HttpServletResponse response,
                          AuthenticationException ex) throws IOException {
-        log.warn("[401] {} {} → unauthenticated", request.getMethod(), request.getRequestURI());
+        log.warn("[401] {} {} → unauthenticated", request.getMethod(), RequestLogPath.of(request));
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setContentType("application/json;charset=UTF-8");
         objectMapper.writeValue(response.getOutputStream(),

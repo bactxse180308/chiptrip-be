@@ -7,7 +7,7 @@ import com.tranbac.chiptripbe.module.trip.dto.request.AddCommentRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.TripPublishRequest;
 import com.tranbac.chiptripbe.module.trip.dto.response.LikeResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripCommentResponse;
-import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripReadOnlyResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripPublicSummaryResponse;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
 import com.tranbac.chiptripbe.module.trip.service.TripSocialService;
@@ -48,7 +48,7 @@ public class TripSocialController {
 
     @Operation(summary = "Xem chi tiết trip công khai (read-only)")
     @GetMapping("/{tripId}/public")
-    public ResponseEntity<ApiResponse<TripDetailResponse>> getPublicTrip(@PathVariable Long tripId) {
+    public ResponseEntity<ApiResponse<TripReadOnlyResponse>> getPublicTrip(@PathVariable Long tripId) {
         return ResponseEntity.ok(ApiResponse.ok(tripService.getPublicTrip(tripId)));
     }
 

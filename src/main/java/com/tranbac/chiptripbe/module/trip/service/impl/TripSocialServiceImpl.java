@@ -310,8 +310,8 @@ class TripSocialServiceImpl implements TripSocialService {
                 .id(trip.getId())
                 .title(trip.getTitle())
                 .destination(trip.getDestination())
-                .dateStart(trip.getDateStart())
-                .dateEnd(trip.getDateEnd())
+                .durationDays(trip.getDateStart() == null || trip.getDateEnd() == null ? null
+                        : java.time.temporal.ChronoUnit.DAYS.between(trip.getDateStart(), trip.getDateEnd()) + 1)
                 .peopleCount(trip.getPeopleCount())
                 .thumbnailUrl(thumbnailUrl)
                 .ownerName(trip.getUser().getFullName())

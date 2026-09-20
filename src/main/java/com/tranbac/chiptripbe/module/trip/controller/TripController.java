@@ -7,6 +7,7 @@ import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.response.ShareTokenResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripReadOnlyResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerationStatusDto;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
@@ -172,7 +173,7 @@ public class TripController {
 
     @Operation(summary = "Xem chuyến đi qua link chia sẻ (công khai)")
     @GetMapping("/shared/{shareToken}")
-    public ResponseEntity<ApiResponse<TripDetailResponse>> getSharedTrip(@PathVariable String shareToken) {
+    public ResponseEntity<ApiResponse<TripReadOnlyResponse>> getSharedTrip(@PathVariable String shareToken) {
         return ResponseEntity.ok(ApiResponse.ok(tripService.getSharedTrip(shareToken)));
     }
 

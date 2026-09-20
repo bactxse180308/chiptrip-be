@@ -1,6 +1,8 @@
 package com.tranbac.chiptripbe.module.user.service.impl;
 
 import com.tranbac.chiptripbe.common.service.mail.EmailService;
+import com.tranbac.chiptripbe.common.exception.AppException;
+import com.tranbac.chiptripbe.module.user.dto.request.GrantCreditsRequest;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
 import com.tranbac.chiptripbe.module.auth.repository.EmailVerificationTokenRepository;
 import com.tranbac.chiptripbe.module.auth.repository.RefreshTokenRepository;
@@ -19,6 +21,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -27,9 +30,10 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class UserServiceImplTest {
@@ -48,6 +52,45 @@ class UserServiceImplTest {
 
     @InjectMocks
     private UserServiceImpl service;
+
+    @Test
+    void adminGrantUsesAtomicUpdateAndReturnsFreshFractionalBalance() {
+        User fresh = user();
+        fresh.setAiCredits(1);
+        fresh.setAiCreditUnits(175);
+        when(userRepository.addCredits(USER_ID, 1)).thenReturn(1);
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(fresh));
+        var result = service.adminGrantCredits(USER_ID, grant(1));
+        assertEquals(175, result.getAiCreditUnits());
+        assertEquals(new BigDecimal("1.75"), result.getAiCreditBalance());
+        var order = inOrder(userRepository);
+        order.verify(userRepository).addCredits(USER_ID, 1);
+        order.verify(userRepository).findById(USER_ID);
+        verify(userRepository, never()).save(any());
+    }
+
+    @Test
+    void adminGrantRejectsInvalidAmountBeforeDatabaseAccess() {
+        for (Integer amount : new Integer[]{null, -1, 0, Integer.MAX_VALUE}) {
+            assertThrows(AppException.class, () -> service.adminGrantCredits(USER_ID, grant(amount)));
+        }
+        verifyNoInteractions(userRepository);
+    }
+
+    @Test
+    void adminGrantCannotSilentlySucceedOnOverflowOrMissingUser() {
+        when(userRepository.existsById(USER_ID)).thenReturn(true, false);
+        assertThrows(AppException.class, () -> service.adminGrantCredits(USER_ID, grant(1)));
+        assertThrows(AppException.class, () -> service.adminGrantCredits(USER_ID, grant(1)));
+        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).findById(any());
+    }
+
+    private GrantCreditsRequest grant(Integer amount) {
+        var request = new GrantCreditsRequest();
+        ReflectionTestUtils.setField(request, "amount", amount);
+        return request;
+    }
 
     @Test
     void getAdminUserDetail_readsAiAggregateRowWithoutClassCastException() {

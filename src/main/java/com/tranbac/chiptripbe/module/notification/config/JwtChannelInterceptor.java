@@ -21,6 +21,7 @@ import org.springframework.stereotype.Component;
 import java.security.Principal;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Set;
 
 /**
  * Xác thực JWT cho WebSocket STOMP.
@@ -38,6 +39,11 @@ public class JwtChannelInterceptor implements ChannelInterceptor {
 
     private final JwtProvider jwtProvider;
     private final UserDetailsServiceImpl userDetailsService;
+    private final WebSocketAccountGuard accountGuard;
+
+    private static final Set<String> USER_QUEUES = Set.of(
+            "/user/queue/messages", "/user/queue/notifications",
+            "/user/queue/trip-generation", "/user/queue/trip-enrichment");
 
     @Override
     public Message<?> preSend(Message<?> message, MessageChannel channel) {
@@ -50,7 +56,9 @@ public class JwtChannelInterceptor implements ChannelInterceptor {
         switch (command) {
             case CONNECT -> handleConnect(accessor);
             case SUBSCRIBE -> handleSubscribe(accessor);
-            default -> { /* các frame khác không cần check */ }
+            case SEND -> throw AppException.forbidden("Client messages are not supported on this connection");
+            case DISCONNECT, UNSUBSCRIBE -> { }
+            default -> throw AppException.forbidden("Unsupported STOMP command");
         }
         return message;
     }
@@ -73,25 +81,31 @@ public class JwtChannelInterceptor implements ChannelInterceptor {
         }
 
         UserPrincipal principal = (UserPrincipal) userDetailsService.loadUserByUsername(email);
-        if (!principal.getId().equals(userId)) {
+        if (!principal.isEnabled() || !principal.getId().equals(userId)) {
             throw AppException.unauthorized("Token không khớp với user");
         }
 
         UsernamePasswordAuthenticationToken auth = new UsernamePasswordAuthenticationToken(
                 new WsUserPrincipal(principal.getId()), null, principal.getAuthorities());
         accessor.setUser(auth);
+        if (accessor.getSessionId() == null) throw AppException.unauthorized("Missing session");
+        accountGuard.register(accessor.getSessionId(), principal.getId());
         log.debug("WS CONNECT authenticated userId={}", userId);
     }
 
     private void handleSubscribe(StompHeaderAccessor accessor) {
         String destination = accessor.getDestination();
-        if (destination == null) return;
+        if (accessor.getUser() == null || !accountGuard.isActive(accessor.getSessionId())) {
+            throw AppException.unauthorized("Account unavailable");
+        }
 
-        if (destination.startsWith(ADMIN_SUPPORT_TOPIC)) {
+        if (ADMIN_SUPPORT_TOPIC.equals(destination)) {
             if (!hasAuthority(accessor.getUser(), ADMIN_AUTHORITY)) {
                 log.warn("WS SUBSCRIBE denied to {} for non-admin", destination);
                 throw AppException.forbidden("Không có quyền nghe kênh này");
             }
+        } else if (destination == null || !USER_QUEUES.contains(destination)) {
+            throw AppException.forbidden("Subscription destination is not allowed");
         }
     }
 

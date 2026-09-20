@@ -18,6 +18,7 @@ import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.response.ShareTokenResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
+import com.tranbac.chiptripbe.module.trip.dto.response.TripReadOnlyResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripEnrichmentResultDto;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripMemberResponse;
@@ -740,15 +741,17 @@ class TripServiceImpl implements TripService {
 
         // Bản sao là trip riêng tư mới của người clone — KHÔNG kế thừa isPublic/shareToken/
         // inviteToken/likesCount/commentsCount (builder không set → mặc định false/null/0)
+        LocalDate copyStart = isOwner ? original.getDateStart() : LocalDate.now(VN_ZONE);
+        LocalDate copyEnd = copyStart.plusDays(ChronoUnit.DAYS.between(original.getDateStart(), original.getDateEnd()));
         Trip clone = Trip.builder()
                 .user(cloner)
                 .title(original.getTitle() + " (Copy)")
                 .departure(original.getDeparture())
                 .destination(original.getDestination())
-                .dateStart(original.getDateStart())
-                .dateEnd(original.getDateEnd())
+                .dateStart(copyStart)
+                .dateEnd(copyEnd)
                 .peopleCount(original.getPeopleCount())
-                .budgetVnd(original.getBudgetVnd())
+                .budgetVnd(isOwner ? original.getBudgetVnd() : 0L)
                 .styles(original.getStyles())
                 .build();
         clone = tripRepository.save(clone);
@@ -759,7 +762,7 @@ class TripServiceImpl implements TripService {
             TripDay cloneDay = TripDay.builder()
                     .trip(clone)
                     .dayNumber(originalDay.getDayNumber())
-                    .date(originalDay.getDate())
+                    .date(isOwner ? originalDay.getDate() : copyStart.plusDays(originalDay.getDayNumber() - 1L))
                     .build();
             cloneDay = tripDayRepository.save(cloneDay);
 
@@ -779,7 +782,7 @@ class TripServiceImpl implements TripService {
                         .geocodingProvider(originalActivity.getGeocodingProvider())
                         .placeCacheId(originalActivity.getPlaceCacheId())
                         .imageUrl(originalActivity.getImageUrl())
-                        .bookingUrl(originalActivity.getBookingUrl())
+                        .bookingUrl(isOwner ? originalActivity.getBookingUrl() : null)
                         .displayOrder(originalActivity.getDisplayOrder())
                         .build();
                 activityRepository.save(cloneActivity);
@@ -787,7 +790,7 @@ class TripServiceImpl implements TripService {
         }
 
         // Clone checklist
-        for (ChecklistItem originalItem : original.getChecklist()) {
+        for (ChecklistItem originalItem : isOwner ? original.getChecklist() : List.<ChecklistItem>of()) {
             ChecklistItem cloneItem = ChecklistItem.builder()
                     .trip(clone)
                     .category(originalItem.getCategory())
@@ -806,10 +809,10 @@ class TripServiceImpl implements TripService {
     @Transactional
     public ShareTokenResponse enableShare(Long userId, Long tripId) {
         Trip trip = findTripByIdAndUserId(tripId, userId);
-        String token = UUID.randomUUID().toString().replace("-", "");
+        String token = TripShareTokens.create();
         trip.setShareToken(token);
         tripRepository.save(trip);
-        log.info("Enabled share for trip id={}, token={}", tripId, token);
+        log.info("Enabled share for trip id={}", tripId);
         return ShareTokenResponse.builder().shareToken(token).build();
     }
 
@@ -824,19 +827,50 @@ class TripServiceImpl implements TripService {
 
     @Override
     @Transactional(readOnly = true)
-    public TripDetailResponse getSharedTrip(String shareToken) {
+    public TripReadOnlyResponse getSharedTrip(String shareToken) {
+        if (!TripShareTokens.isCurrent(shareToken)) {
+            throw AppException.notFound("Link chia sẻ đã hết hiệu lực. Chủ chuyến đi cần tạo link mới.");
+        }
         Trip trip = tripRepository.findByShareToken(shareToken)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy chuyến đi được chia sẻ"));
-        return buildTripDetailResponse(trip);
+        return buildReadOnlyResponse(trip, true);
     }
 
     @Override
     @Transactional(readOnly = true)
-    public TripDetailResponse getPublicTrip(Long tripId) {
+    public TripReadOnlyResponse getPublicTrip(Long tripId) {
         Trip trip = tripRepository.findById(tripId)
                 .filter(Trip::isPublic)
                 .orElseThrow(() -> AppException.notFound("Không tìm thấy chuyến đi"));
-        return buildTripDetailResponse(trip);
+        return buildReadOnlyResponse(trip, false);
+    }
+
+    private TripReadOnlyResponse buildReadOnlyResponse(Trip trip, boolean shared) {
+        List<TripDay> days = tripDayRepository.findByTripIdOrderByDayNumber(trip.getId());
+        List<Activity> activities = activityRepository.findByTripIdWithDayOrderByDayAndOrder(trip.getId());
+        Map<Long, List<Activity>> byDay = activities.stream()
+                .collect(java.util.stream.Collectors.groupingBy(a -> a.getDay().getId()));
+        List<Long> placeIds = activities.stream().map(Activity::getPlaceCacheId)
+                .filter(Objects::nonNull).distinct().toList();
+        Map<Long, PlaceCache> places = new HashMap<>();
+        if (!placeIds.isEmpty()) placeCacheRepository.findAllById(placeIds).forEach(p -> places.put(p.getId(), p));
+        List<TripReadOnlyResponse.Day> resultDays = days.stream().map(day -> {
+            List<TripReadOnlyResponse.Activity> resultActivities = byDay.getOrDefault(day.getId(), List.of()).stream()
+                    .map(a -> toTripDetailActivityDetail(a, places))
+                    .map(a -> new TripReadOnlyResponse.Activity(a.getId(), a.getStartTime(), a.getName(), a.getDescription(),
+                            a.getType(), a.getCostVnd(), a.getLatitude(), a.getLongitude(), a.getImageUrl(),
+                            shared ? a.getBookingUrl() : null, a.getDisplayOrder(), a.getPlaceCacheId(), a.getAddress()))
+                    .toList();
+            long cost = resultActivities.stream().mapToLong(a -> a.costVnd() == null ? 0 : a.costVnd()).sum();
+            return new TripReadOnlyResponse.Day(day.getId(), day.getDayNumber(), shared ? day.getDate() : null, cost, resultActivities);
+        }).toList();
+        User owner = trip.getUser();
+        return new TripReadOnlyResponse(trip.getId(), trip.getTitle(), trip.getDeparture(), trip.getDestination(),
+                shared ? trip.getDateStart() : null, shared ? trip.getDateEnd() : null,
+                trip.getPeopleCount(), trip.getStyles(), resultDays.stream().mapToLong(TripReadOnlyResponse.Day::dayCostVnd).sum(),
+                trip.isPublic(), trip.getLikesCount(), trip.getCommentsCount(),
+                shared ? TripLifecycleStatus.of(trip.getDateStart(), trip.getDateEnd(), LocalDate.now(VN_ZONE)).name() : null,
+                trip.isEnrichmentPending(), new TripReadOnlyResponse.UserInfo(owner.getId(), owner.getFullName(), owner.getAvatarUrl()), resultDays);
     }
 
     // ─── Private helpers ─────────────────────────────────────────────────────
@@ -919,7 +953,7 @@ class TripServiceImpl implements TripService {
                 .createdAt(trip.getCreatedAt())
                 .updatedAt(trip.getUpdatedAt())
                 .totalCostVnd(dayDetails.stream().mapToLong(d -> d.getDayCostVnd() != null ? d.getDayCostVnd() : 0L).sum())
-                .shareToken(trip.getShareToken())
+                .shareToken(TripShareTokens.isCurrent(trip.getShareToken()) ? trip.getShareToken() : null)
                 .isPublic(trip.isPublic())
                 .publishedAt(trip.getPublishedAt())
                 .likesCount(trip.getLikesCount())

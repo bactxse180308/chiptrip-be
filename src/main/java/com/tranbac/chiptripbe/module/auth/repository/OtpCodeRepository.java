@@ -3,6 +3,8 @@ package com.tranbac.chiptripbe.module.auth.repository;
 import com.tranbac.chiptripbe.module.auth.entity.OtpCode;
 import com.tranbac.chiptripbe.module.auth.entity.OtpCode.Purpose;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -12,6 +14,7 @@ import java.util.Optional;
 
 public interface OtpCodeRepository extends JpaRepository<OtpCode, Long> {
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<OtpCode> findTopByEmailAndPurposeOrderByCreatedAtDesc(String email, Purpose purpose);
 
     @Modifying
