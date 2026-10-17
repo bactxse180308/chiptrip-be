@@ -135,7 +135,7 @@ class TripServiceImplTest {
         when(tripRepository.tryClaimEnrichment(
                 anyLong(), any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(1);
         when(activityRepository.updateResolvedPlaceIfQueryUnchanged(
-                anyLong(), anyString(), anyLong(), any(), any(), any(), any(), anyString()))
+                anyLong(), anyString(), any(), any(), anyLong(), any(), any(), any(), any(), anyString()))
                 .thenReturn(1);
     }
 
@@ -178,6 +178,21 @@ class TripServiceImplTest {
         AppException ex = assertThrows(AppException.class, () -> service.generateTrip(USER_ID, req));
 
         assertEquals("DAILY_TRIAL_USED", ex.getCode());
+        verify(aiService, never()).generateItinerary(any(), any());
+    }
+
+    @Test
+    void generateTrip_partialPaidAndTrial_failsBeforeAiProviderCall() {
+        User user = premiumUser();
+        user.setAiCreditUnits(75);
+        user.setTrialCreditBalance(1);
+        user.setTrialCreditDate(LocalDate.now(VN));
+        stubUser(user);
+        LocalDate start = LocalDate.now(VN);
+        GenerateTripRequest req = request(start, start.plusDays(1), List.of("food_tour"));
+
+        assertEquals("DAILY_TRIAL_USED",
+                assertThrows(AppException.class, () -> service.generateTrip(USER_ID, req)).getCode());
         verify(aiService, never()).generateItinerary(any(), any());
     }
 
@@ -550,7 +565,7 @@ class TripServiceImplTest {
         service.generateTrip(USER_ID, req);
 
         verify(activityRepository).updateResolvedPlaceIfQueryUnchanged(
-                31L, query, 17L,
+                31L, query, null, null, 17L,
                 resolved.getLatitude(), resolved.getLongitude(),
                 "goong-17", "Resolved address", "goong");
         verify(tripRepository).markEnrichmentDone(99L);
@@ -575,7 +590,7 @@ class TripServiceImplTest {
         resolved.setId(20L);
         whenBackgroundResolve(query).thenReturn(Optional.of(resolved));
         when(activityRepository.updateResolvedPlaceIfQueryUnchanged(
-                eq(37L), eq(query), eq(20L), any(), any(), any(), any(), anyString()))
+                eq(37L), eq(query), any(), any(), eq(20L), any(), any(), any(), any(), anyString()))
                 .thenReturn(0);
 
         service.generateTrip(USER_ID, req);
@@ -748,7 +763,7 @@ class TripServiceImplTest {
         service.sweepPendingEnrichments();
 
         verify(activityRepository).updateResolvedPlaceIfQueryUnchanged(
-                32L, "Missing coordinate", 18L,
+                32L, "Missing coordinate", null, null, 18L,
                 resolved.getLatitude(), resolved.getLongitude(),
                 null, "Da Lat address", "serpapi");
         verify(tripRepository).markEnrichmentDone(80L);
