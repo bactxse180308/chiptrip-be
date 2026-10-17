@@ -126,12 +126,12 @@ public class AiItineraryValidator {
             } catch (Exception e) {
                 throw badAi("Ngày " + day.getDayNumber() + " có date không hợp lệ: " + day.getDate());
             }
-            if (!parsedDate.equals(request.getStartDate().plusDays(day.getDayNumber() - 1))) {
-                throw badAi("dayNumber=" + day.getDayNumber() + " không khớp date=" + parsedDate);
-            }
             if (parsedDate.isBefore(request.getStartDate()) || parsedDate.isAfter(request.getEndDate())) {
                 throw badAi(String.format("Ngày %d (%s) nằm ngoài khoảng %s..%s",
                         day.getDayNumber(), parsedDate, request.getStartDate(), request.getEndDate()));
+            }
+            if (!parsedDate.equals(request.getStartDate().plusDays(day.getDayNumber() - 1))) {
+                throw badAi("dayNumber=" + day.getDayNumber() + " không khớp date=" + parsedDate);
             }
         }
     }
