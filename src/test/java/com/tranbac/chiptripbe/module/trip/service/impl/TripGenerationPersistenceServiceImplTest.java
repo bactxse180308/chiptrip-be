@@ -112,6 +112,23 @@ class TripGenerationPersistenceServiceImplTest {
     }
 
     @Test
+    void persistGeneratedTrip_hotelQuoteOverBudget_doesNotChargeCredit() {
+        GenerateTripRequest req = request();
+        AiCallResult result = aiResult();
+        com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult.AiActivity act =
+                result.itinerary().getDays().get(0).getActivities().get(0);
+        act.setType("ACCOMMODATION");
+        com.tranbac.chiptripbe.module.place.entity.PlaceCache hotel =
+                new com.tranbac.chiptripbe.module.place.entity.PlaceCache();
+        hotel.setId(31L);
+        hotel.setPricePerNightVnd(7_000_000L);
+
+        assertThrows(AppException.class, () -> service.persistGeneratedTrip(
+                USER_ID, req, result, java.util.Map.of(act, hotel), false));
+        verify(creditService, never()).consumeForGenerate(anyLong());
+    }
+
+    @Test
     void persistGeneratedTrip_creditExhausted_throwsAppExceptionAndNoEvent() {
         when(creditService.consumeForGenerate(USER_ID)).thenThrow(AppException.dailyTrialUsed());
 

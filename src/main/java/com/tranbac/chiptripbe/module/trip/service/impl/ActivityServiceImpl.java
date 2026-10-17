@@ -83,8 +83,16 @@ class ActivityServiceImpl implements ActivityService {
         if (request.getDescription() != null) activity.setDescription(request.getDescription());
         if (request.getType() != null) activity.setType(request.getType());
         if (request.getCostVnd() != null) activity.setCostVnd(request.getCostVnd());
-        if (request.getLatitude() != null) activity.setLatitude(request.getLatitude());
-        if (request.getLongitude() != null) activity.setLongitude(request.getLongitude());
+        if (request.getLatitude() != null || request.getLongitude() != null) {
+            if (request.getLatitude() != null) activity.setLatitude(request.getLatitude());
+            if (request.getLongitude() != null) activity.setLongitude(request.getLongitude());
+            // Background workers may update metadata, but must never overwrite a manual location.
+            activity.setGeocodingProvider("manual");
+            activity.setPlaceCacheId(null);
+            activity.setPlaceCache(null);
+            activity.setPlaceId(null);
+            activity.setFormattedAddress(null);
+        }
         if (request.getImageUrl() != null) activity.setImageUrl(request.getImageUrl());
         if (request.getBookingUrl() != null) activity.setBookingUrl(request.getBookingUrl());
         if (request.getDisplayOrder() != null) activity.setDisplayOrder(request.getDisplayOrder());

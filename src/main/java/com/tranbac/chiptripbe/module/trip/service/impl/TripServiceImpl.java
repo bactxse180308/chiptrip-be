@@ -10,6 +10,7 @@ import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
 import com.tranbac.chiptripbe.module.ai.service.AiService;
+import com.tranbac.chiptripbe.module.ai.service.AiItineraryValidator;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.place.repository.PlaceCacheRepository;
 import com.tranbac.chiptripbe.module.place.service.PlaceEnrichmentService;
@@ -137,6 +138,22 @@ class TripServiceImpl implements TripService {
         // Ngày 1 enrich FULL đồng bộ; ngày 2..N chỉ BASIC (toạ độ) để trả response nhanh.
         ResolveOutcome outcome = resolvePlaces(aiCallResult.itinerary(), request);
 
+        // Giá khách sạn từ provider có thể thay đổi cost sau khi AI validation thành công.
+        // Check sớm trước khi mở transaction lưu trip để tránh một graph cần rollback.
+        long actualTotalCost = 0;
+        for (AiItineraryResult.AiDay day : aiCallResult.itinerary().getDays()) {
+            for (AiItineraryResult.AiActivity activity : day.getActivities()) {
+                PlaceCache place = outcome.resolved().get(activity);
+                long cost = activity.getCostVnd() == null ? 0L : Math.max(0L, activity.getCostVnd());
+                if (parseActivityType(activity.getType()) == ActivityType.ACCOMMODATION
+                        && place != null && place.getPricePerNightVnd() != null) {
+                    cost = place.getPricePerNightVnd();
+                }
+                actualTotalCost = Math.addExact(actualTotalCost, cost);
+            }
+        }
+        AiItineraryValidator.validateBudget(actualTotalCost, request);
+
         // enrichmentPending persist = còn việc enrich nền → FE poll tiếp; nếu job nền dưới đây không
         // chạy được (queue DiscardPolicy / app restart), cờ giữ true → TripEnrichmentScheduler quét lại.
         boolean needsBackgroundEnrichment = outcome.backgroundJob() != null;
@@ -214,7 +231,9 @@ class TripServiceImpl implements TripService {
 
         // 2) Có credit để generate không (fail-fast, không trừ ở đây)
         int effectiveTrial = today().equals(user.getTrialCreditDate()) ? user.getTrialCreditBalance() : 1;
-        boolean hasCredit = user.effectiveAiCreditUnits() >= 100 || effectiveTrial >= 1;
+        int paidUnits = user.effectiveAiCreditUnits();
+        // Trial chỉ được dùng khi paid = 0, giống điều kiện atomic deduction tại UserRepository.
+        boolean hasCredit = paidUnits >= 100 || (paidUnits == 0 && effectiveTrial >= 1);
         if (!hasCredit) {
             throw AppException.dailyTrialUsed();   // 402
         }
@@ -645,6 +664,8 @@ class TripServiceImpl implements TripService {
             int updated = activityRepository.updateResolvedPlaceIfQueryUnchanged(
                     activity.getId(),
                     activity.getSearchQuery(),
+                    activity.getLatitude(),
+                    activity.getLongitude(),
                     cache.getId(),
                     cache.getLatitude(),
                     cache.getLongitude(),

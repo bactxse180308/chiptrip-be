@@ -74,6 +74,7 @@ public class AiItineraryValidator {
         if (title == null || title.isBlank()) {
             throw badAi("thiếu title");
         }
+        if (title.length() > 255) throw badAi("title vượt 255 ký tự");
         String destination = request.getDestination();
         if (destination == null || destination.isBlank()) return; // không có gì để đối chiếu
         // Bỏ phần tỉnh sau dấu phẩy: "Đà Lạt, Lâm Đồng" -> "Đà Lạt".
@@ -90,9 +91,10 @@ public class AiItineraryValidator {
             throw badAi("thiếu checklist chuẩn bị đồ");
         }
         for (AiItineraryResult.AiChecklistItem item : checklist) {
-            if (item.getName() == null || item.getName().isBlank()) {
+            if (item == null || item.getName() == null || item.getName().isBlank()) {
                 throw badAi("checklist có mục thiếu name");
             }
+            if (item.getName().length() > 255) throw badAi("checklist name vượt 255 ký tự");
         }
     }
 
@@ -107,7 +109,10 @@ public class AiItineraryValidator {
 
         Set<Integer> dayNumbersSeen = new HashSet<>();
         for (AiItineraryResult.AiDay day : days) {
-            if (day.getDayNumber() == null) throw badAi("Ngày trong lịch trình thiếu dayNumber");
+            if (day == null || day.getDayNumber() == null) throw badAi("Ngày trong lịch trình thiếu dayNumber");
+            if (day.getDayNumber() < 1 || day.getDayNumber() > expectedDays) {
+                throw badAi("dayNumber ngoài khoảng 1.." + expectedDays);
+            }
             if (!dayNumbersSeen.add(day.getDayNumber())) {
                 throw badAi("Trùng dayNumber=" + day.getDayNumber());
             }
@@ -125,6 +130,9 @@ public class AiItineraryValidator {
                 throw badAi(String.format("Ngày %d (%s) nằm ngoài khoảng %s..%s",
                         day.getDayNumber(), parsedDate, request.getStartDate(), request.getEndDate()));
             }
+            if (!parsedDate.equals(request.getStartDate().plusDays(day.getDayNumber() - 1))) {
+                throw badAi("dayNumber=" + day.getDayNumber() + " không khớp date=" + parsedDate);
+            }
         }
     }
 
@@ -141,8 +149,19 @@ public class AiItineraryValidator {
             }
 
             for (AiItineraryResult.AiActivity activity : activities) {
+                if (activity == null) throw badAi("activity null");
                 if (activity.getName() == null || activity.getName().isBlank()) {
                     throw badAi("Ngày " + day.getDayNumber() + " có activity thiếu name");
+                }
+                if (activity.getName().length() > 255) throw badAi("activity name vượt 255 ký tự");
+                if (activity.getDescription() != null && activity.getDescription().length() > 1000) {
+                    throw badAi("activity description vượt 1000 ký tự");
+                }
+                if (activity.getSearchQuery() != null && activity.getSearchQuery().length() > 300) {
+                    throw badAi("activity searchQuery vượt 300 ký tự");
+                }
+                if (activity.getBookingUrl() != null && activity.getBookingUrl().length() > 500) {
+                    throw badAi("activity bookingUrl vượt 500 ký tự");
                 }
 
                 if (activity.getTime() == null || activity.getTime().isBlank()) {
@@ -187,15 +206,15 @@ public class AiItineraryValidator {
         return totalCost;
     }
 
-    private void validateBudget(long totalCost, GenerateTripRequest request) {
+    public static void validateBudget(long totalCost, GenerateTripRequest request) {
         if (request.getBudgetVnd() == null || request.getBudgetVnd() <= 0) return;
         long budget = request.getBudgetVnd();
         long percentTolerance = (long) (budget * (BUDGET_TOLERANCE - 1.0));
         long tolerance = Math.max(percentTolerance, BUDGET_TOLERANCE_FLOOR_VND);
         long maxAllowed = budget + tolerance;
         if (totalCost > maxAllowed) {
-            throw badAi(String.format(
-                    "Tổng chi phí AI sinh (%,d VNĐ) vượt ngân sách %,d VNĐ quá %,d VNĐ cho phép",
+            throw AppException.badRequest(String.format(
+                    "Tổng chi phí lịch trình (%,d VNĐ) vượt ngân sách %,d VNĐ quá %,d VNĐ cho phép",
                     totalCost, budget, tolerance));
         }
     }

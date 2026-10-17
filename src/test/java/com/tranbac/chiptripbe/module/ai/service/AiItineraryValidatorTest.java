@@ -41,6 +41,21 @@ class AiItineraryValidatorTest {
     }
 
     @Test
+    void validate_duplicateCalendarDateWithDifferentDayNumbers_rejected() {
+        GenerateTripRequest req = request(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 2), 5_000_000L);
+        AiItineraryResult result = itinerary(
+                day(1, "2026-07-01", List.of(
+                        activity("08:00", "A", "FOOD", "Pho Ha Noi", 10_000L),
+                        activity("09:00", "B", "FOOD", "Bun Ha Noi", 10_000L),
+                        activity("10:00", "C", "FOOD", "Com Ha Noi", 10_000L))),
+                day(2, "2026-07-01", List.of(
+                        activity("08:00", "D", "FOOD", "Pho Ha Noi", 10_000L),
+                        activity("09:00", "E", "FOOD", "Bun Ha Noi", 10_000L),
+                        activity("10:00", "F", "FOOD", "Com Ha Noi", 10_000L))));
+        assertThrows(AppException.class, () -> validator.validate(result, req));
+    }
+
+    @Test
     void validate_dayCountMismatch_throwsAppException() {
         // Yêu cầu 3 ngày nhưng AI trả 2 ngày
         GenerateTripRequest req = request(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 3), 5_000_000L);

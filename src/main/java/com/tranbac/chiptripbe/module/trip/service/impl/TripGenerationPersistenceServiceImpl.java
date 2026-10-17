@@ -11,6 +11,7 @@ import com.tranbac.chiptripbe.module.ai.dto.AiCallResult;
 import com.tranbac.chiptripbe.module.ai.dto.AiItineraryResult;
 import com.tranbac.chiptripbe.module.ai.entity.AiUsage;
 import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
+import com.tranbac.chiptripbe.module.ai.service.AiItineraryValidator;
 import com.tranbac.chiptripbe.module.notification.event.AiCreditsLowEvent;
 import com.tranbac.chiptripbe.module.place.entity.PlaceCache;
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
@@ -86,6 +87,8 @@ class TripGenerationPersistenceServiceImpl implements TripGenerationPersistenceS
             geocodeFailedCount += dr.geocodeFailed;
         }
 
+        // Check the actual quoted hotel cost in the transaction, before credit debit.
+        AiItineraryValidator.validateBudget(totalCost, request);
         List<TripGenerateResponse.ChecklistDetail> checklistDetails = persistChecklist(trip, itinerary);
 
         // Log AiUsage TRƯỚC khi trừ credit — vì @Modifying(clearAutomatically=true) sẽ detach context.

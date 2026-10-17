@@ -32,9 +32,14 @@ public interface ActivityRepository extends JpaRepository<Activity, Long> {
     @Query("UPDATE Activity a SET a.placeCacheId = :placeCacheId, a.latitude = :latitude, " +
            "a.longitude = :longitude, a.placeId = :placeId, a.formattedAddress = :formattedAddress, " +
            "a.geocodingProvider = :geocodingProvider " +
-           "WHERE a.id = :activityId AND a.searchQuery = :expectedSearchQuery")
+           "WHERE a.id = :activityId AND a.searchQuery = :expectedSearchQuery " +
+           "AND (a.geocodingProvider IS NULL OR a.geocodingProvider <> 'manual') " +
+           "AND (a.latitude = :expectedLatitude OR (a.latitude IS NULL AND :expectedLatitude IS NULL)) " +
+           "AND (a.longitude = :expectedLongitude OR (a.longitude IS NULL AND :expectedLongitude IS NULL))")
     int updateResolvedPlaceIfQueryUnchanged(@Param("activityId") Long activityId,
                                             @Param("expectedSearchQuery") String expectedSearchQuery,
+                                            @Param("expectedLatitude") BigDecimal expectedLatitude,
+                                            @Param("expectedLongitude") BigDecimal expectedLongitude,
                                             @Param("placeCacheId") Long placeCacheId,
                                             @Param("latitude") BigDecimal latitude,
                                             @Param("longitude") BigDecimal longitude,
