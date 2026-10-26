@@ -2,9 +2,7 @@ package com.tranbac.chiptripbe.module.trip.service;
 
 import com.tranbac.chiptripbe.module.trip.dto.request.GenerateTripRequest;
 import com.tranbac.chiptripbe.module.trip.dto.request.UpdateTripRequest;
-import com.tranbac.chiptripbe.module.trip.dto.response.ShareTokenResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripDetailResponse;
-import com.tranbac.chiptripbe.module.trip.dto.response.TripReadOnlyResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerateResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
 import org.springframework.data.domain.Page;
@@ -32,19 +30,5 @@ public interface TripService {
 
     TripDetailResponse cloneTrip(Long userId, Long tripId);
 
-    ShareTokenResponse enableShare(Long userId, Long tripId);
 
-    void disableShare(Long userId, Long tripId);
-
-    TripReadOnlyResponse getSharedTrip(String shareToken);
-
-    /** Xem trip public (feed Khám phá) — trả 404 nếu trip không tồn tại hoặc is_public=false. */
-    TripReadOnlyResponse getPublicTrip(Long tripId);
-
-    /**
-     * Bảo trì nội bộ (gọi bởi TripEnrichmentScheduler): quét các trip còn enrichmentPending mà job
-     * enrich nền in-memory đã mất (app restart / queue đầy / provider down) rồi enrich lại từ DB.
-     * Durable safety-net cho enrich nền ngày 2..N.
-     */
-    void sweepPendingEnrichments();
 }

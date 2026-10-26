@@ -1,6 +1,6 @@
 package com.tranbac.chiptripbe.module.trip.scheduler;
 
-import com.tranbac.chiptripbe.module.trip.service.TripService;
+import com.tranbac.chiptripbe.module.trip.service.TripEnrichmentMaintenance;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -22,13 +22,13 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class TripEnrichmentScheduler {
 
-    private final TripService tripService;
+    private final TripEnrichmentMaintenance tripEnrichmentMaintenance;
 
     /** Mỗi 5 phút: quét & enrich lại các trip còn pending mà job nền in-memory đã mất. */
     @Scheduled(fixedDelay = 5 * 60 * 1000, initialDelay = 2 * 60 * 1000)
     public void sweep() {
         try {
-            tripService.sweepPendingEnrichments();
+            tripEnrichmentMaintenance.sweepPendingEnrichments();
         } catch (Exception e) {
             log.warn("TripEnrichmentScheduler sweep lỗi: {}", e.getMessage());
         }

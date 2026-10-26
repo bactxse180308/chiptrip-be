@@ -9,7 +9,7 @@ import com.tranbac.chiptripbe.module.trip.dto.response.LikeResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripCommentResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripReadOnlyResponse;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripPublicSummaryResponse;
-import com.tranbac.chiptripbe.module.trip.service.TripService;
+import com.tranbac.chiptripbe.module.trip.service.TripSharingService;
 import com.tranbac.chiptripbe.module.trip.service.TripSocialService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -32,7 +32,7 @@ import java.util.List;
 public class TripSocialController {
 
     private final TripSocialService tripSocialService;
-    private final TripService tripService;
+    private final TripSharingService tripSharingService;
 
     @Operation(summary = "Feed trip công khai (lọc theo destination)")
     @GetMapping("/public/feed")
@@ -49,7 +49,7 @@ public class TripSocialController {
     @Operation(summary = "Xem chi tiết trip công khai (read-only)")
     @GetMapping("/{tripId}/public")
     public ResponseEntity<ApiResponse<TripReadOnlyResponse>> getPublicTrip(@PathVariable Long tripId) {
-        return ResponseEntity.ok(ApiResponse.ok(tripService.getPublicTrip(tripId)));
+        return ResponseEntity.ok(ApiResponse.ok(tripSharingService.getPublicTrip(tripId)));
     }
 
     @Operation(summary = "Đăng / hủy công khai chuyến đi")
