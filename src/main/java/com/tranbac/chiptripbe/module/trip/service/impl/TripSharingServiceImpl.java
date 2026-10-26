@@ -13,6 +13,7 @@ import com.tranbac.chiptripbe.module.trip.repository.ActivityRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripDayRepository;
 import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.trip.service.TripSharingService;
+import com.tranbac.chiptripbe.module.user.entity.User;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
