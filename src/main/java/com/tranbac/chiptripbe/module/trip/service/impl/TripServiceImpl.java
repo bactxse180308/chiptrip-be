@@ -38,6 +38,7 @@ import com.tranbac.chiptripbe.module.trip.repository.TripRepository;
 import com.tranbac.chiptripbe.module.trip.service.TripGenerationPersistenceService;
 import com.tranbac.chiptripbe.module.trip.service.TripMemberService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
+import com.tranbac.chiptripbe.module.trip.service.TripEnrichmentMaintenance;
 import com.tranbac.chiptripbe.module.user.entity.User;
 import com.tranbac.chiptripbe.module.user.repository.UserRepository;
 import com.tranbac.chiptripbe.module.user.service.EntitlementPolicy;
@@ -69,7 +70,7 @@ import java.util.concurrent.TimeUnit;
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
-class TripServiceImpl implements TripService {
+class TripServiceImpl implements TripService, TripEnrichmentMaintenance {
 
     private static final ZoneId VN_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
 
@@ -112,6 +113,7 @@ class TripServiceImpl implements TripService {
     private final Executor enrichmentExecutor;
     @Qualifier("backgroundEnrichmentExecutor")
     private final Executor backgroundEnrichmentExecutor;
+    private final TripActivityViewMapper tripActivityViewMapper;
 
     /**
      * Orchestration only — KHÔNG annotate @Transactional.
@@ -805,74 +807,6 @@ class TripServiceImpl implements TripService {
         return buildTripDetailResponse(clone);
     }
 
-    @Override
-    @Transactional
-    public ShareTokenResponse enableShare(Long userId, Long tripId) {
-        Trip trip = findTripByIdAndUserId(tripId, userId);
-        String token = TripShareTokens.create();
-        trip.setShareToken(token);
-        tripRepository.save(trip);
-        log.info("Enabled share for trip id={}", tripId);
-        return ShareTokenResponse.builder().shareToken(token).build();
-    }
-
-    @Override
-    @Transactional
-    public void disableShare(Long userId, Long tripId) {
-        Trip trip = findTripByIdAndUserId(tripId, userId);
-        trip.setShareToken(null);
-        tripRepository.save(trip);
-        log.info("Disabled share for trip id={}", tripId);
-    }
-
-    @Override
-    @Transactional(readOnly = true)
-    public TripReadOnlyResponse getSharedTrip(String shareToken) {
-        if (!TripShareTokens.isCurrent(shareToken)) {
-            throw AppException.notFound("Link chia sẻ đã hết hiệu lực. Chủ chuyến đi cần tạo link mới.");
-        }
-        Trip trip = tripRepository.findByShareToken(shareToken)
-                .orElseThrow(() -> AppException.notFound("Không tìm thấy chuyến đi được chia sẻ"));
-        return buildReadOnlyResponse(trip, true);
-    }
-
-    @Override
-    @Transactional(readOnly = true)
-    public TripReadOnlyResponse getPublicTrip(Long tripId) {
-        Trip trip = tripRepository.findById(tripId)
-                .filter(Trip::isPublic)
-                .orElseThrow(() -> AppException.notFound("Không tìm thấy chuyến đi"));
-        return buildReadOnlyResponse(trip, false);
-    }
-
-    private TripReadOnlyResponse buildReadOnlyResponse(Trip trip, boolean shared) {
-        List<TripDay> days = tripDayRepository.findByTripIdOrderByDayNumber(trip.getId());
-        List<Activity> activities = activityRepository.findByTripIdWithDayOrderByDayAndOrder(trip.getId());
-        Map<Long, List<Activity>> byDay = activities.stream()
-                .collect(java.util.stream.Collectors.groupingBy(a -> a.getDay().getId()));
-        List<Long> placeIds = activities.stream().map(Activity::getPlaceCacheId)
-                .filter(Objects::nonNull).distinct().toList();
-        Map<Long, PlaceCache> places = new HashMap<>();
-        if (!placeIds.isEmpty()) placeCacheRepository.findAllById(placeIds).forEach(p -> places.put(p.getId(), p));
-        List<TripReadOnlyResponse.Day> resultDays = days.stream().map(day -> {
-            List<TripReadOnlyResponse.Activity> resultActivities = byDay.getOrDefault(day.getId(), List.of()).stream()
-                    .map(a -> toTripDetailActivityDetail(a, places))
-                    .map(a -> new TripReadOnlyResponse.Activity(a.getId(), a.getStartTime(), a.getName(), a.getDescription(),
-                            a.getType(), a.getCostVnd(), a.getLatitude(), a.getLongitude(), a.getImageUrl(),
-                            shared ? a.getBookingUrl() : null, a.getDisplayOrder(), a.getPlaceCacheId(), a.getAddress()))
-                    .toList();
-            long cost = resultActivities.stream().mapToLong(a -> a.costVnd() == null ? 0 : a.costVnd()).sum();
-            return new TripReadOnlyResponse.Day(day.getId(), day.getDayNumber(), shared ? day.getDate() : null, cost, resultActivities);
-        }).toList();
-        User owner = trip.getUser();
-        return new TripReadOnlyResponse(trip.getId(), trip.getTitle(), trip.getDeparture(), trip.getDestination(),
-                shared ? trip.getDateStart() : null, shared ? trip.getDateEnd() : null,
-                trip.getPeopleCount(), trip.getStyles(), resultDays.stream().mapToLong(TripReadOnlyResponse.Day::dayCostVnd).sum(),
-                trip.isPublic(), trip.getLikesCount(), trip.getCommentsCount(),
-                shared ? TripLifecycleStatus.of(trip.getDateStart(), trip.getDateEnd(), LocalDate.now(VN_ZONE)).name() : null,
-                trip.isEnrichmentPending(), new TripReadOnlyResponse.UserInfo(owner.getId(), owner.getFullName(), owner.getAvatarUrl()), resultDays);
-    }
-
     // ─── Private helpers ─────────────────────────────────────────────────────
 
     private Trip findTripByIdAndUserId(Long tripId, Long userId) {
@@ -911,7 +845,7 @@ class TripServiceImpl implements TripService {
         List<TripDetailResponse.DayDetail> dayDetails = days.stream().map(day -> {
             List<TripDetailResponse.ActivityDetail> activityDetails = activitiesByDay
                     .getOrDefault(day.getId(), List.of()).stream()
-                    .map(act -> toTripDetailActivityDetail(act, cacheMap)).toList();
+                    .map(act -> tripActivityViewMapper.toDetail(act, cacheMap)).toList();
             return TripDetailResponse.DayDetail.builder()
                     .id(day.getId())
                     .dayNumber(day.getDayNumber())
@@ -1026,46 +960,5 @@ class TripServiceImpl implements TripService {
         }
     }
 
-    private TripDetailResponse.ActivityDetail toTripDetailActivityDetail(Activity activity, Map<Long, PlaceCache> cacheMap) {
-        String imgUrl = activity.getImageUrl();
-        if ((imgUrl == null || imgUrl.isBlank()) && activity.getPlaceCacheId() != null) {
-            PlaceCache p = cacheMap.get(activity.getPlaceCacheId());
-            if (p != null) {
-                imgUrl = extractFirstPhotoUrl(p.getPhotosJson());
-            }
-        }
-
-        return TripDetailResponse.ActivityDetail.builder()
-                .id(activity.getId())
-                .startTime(activity.getStartTime())
-                .name(activity.getName())
-                .description(activity.getDescription())
-                .type(activity.getType())
-                .costVnd(activity.getCostVnd())
-                .latitude(activity.getLatitude())
-                .longitude(activity.getLongitude())
-                .imageUrl(imgUrl)
-                .bookingUrl(activity.getBookingUrl())
-                .displayOrder(activity.getDisplayOrder())
-                .placeCacheId(activity.getPlaceCacheId())
-                .address(activity.getFormattedAddress())
-                .build();
-    }
-
-    private String extractFirstPhotoUrl(String photosJson) {
-        if (photosJson == null || photosJson.isBlank()) return null;
-        try {
-            List<Map<String, String>> raw = objectMapper.readValue(photosJson, new TypeReference<List<Map<String, String>>>() {});
-            if (raw != null && !raw.isEmpty()) {
-                Map<String, String> first = raw.get(0);
-                String url = first.get("thumbnail");
-                if (url == null || url.isBlank()) {
-                    url = first.get("url");
-                }
-                return url;
-            }
-        } catch (Exception ignored) {}
-        return null;
-    }
 
 }

@@ -13,6 +13,7 @@ import com.tranbac.chiptripbe.module.trip.dto.response.TripGenerationStatusDto;
 import com.tranbac.chiptripbe.module.trip.dto.response.TripSummaryResponse;
 import com.tranbac.chiptripbe.module.trip.service.TripExportService;
 import com.tranbac.chiptripbe.module.trip.service.TripService;
+import com.tranbac.chiptripbe.module.trip.service.TripSharingService;
 import com.tranbac.chiptripbe.module.trip.service.impl.AsyncTripGenerator;
 import com.tranbac.chiptripbe.module.trip.service.impl.TripGenerationLock;
 import com.tranbac.chiptripbe.module.trip.service.impl.TripGenerationStatusTracker;
@@ -40,6 +41,7 @@ import java.util.UUID;
 public class TripController {
 
     private final TripService tripService;
+    private final TripSharingService tripSharingService;
     private final TripExportService tripExportService;
     private final AsyncTripGenerator asyncTripGenerator;
     private final TripGenerationLock tripGenerationLock;
@@ -157,7 +159,7 @@ public class TripController {
     public ResponseEntity<ApiResponse<ShareTokenResponse>> enableShare(
             @AuthenticationPrincipal UserPrincipal principal,
             @PathVariable Long id) {
-        return ResponseEntity.ok(ApiResponse.ok(tripService.enableShare(principal.getId(), id)));
+        return ResponseEntity.ok(ApiResponse.ok(tripSharingService.enableShare(principal.getId(), id)));
     }
 
     @Operation(summary = "Tắt chia sẻ chuyến đi")
@@ -167,14 +169,14 @@ public class TripController {
     public ResponseEntity<ApiResponse<Void>> disableShare(
             @AuthenticationPrincipal UserPrincipal principal,
             @PathVariable Long id) {
-        tripService.disableShare(principal.getId(), id);
+        tripSharingService.disableShare(principal.getId(), id);
         return ResponseEntity.status(HttpStatus.NO_CONTENT).body(ApiResponse.noContent());
     }
 
     @Operation(summary = "Xem chuyến đi qua link chia sẻ (công khai)")
     @GetMapping("/shared/{shareToken}")
     public ResponseEntity<ApiResponse<TripReadOnlyResponse>> getSharedTrip(@PathVariable String shareToken) {
-        return ResponseEntity.ok(ApiResponse.ok(tripService.getSharedTrip(shareToken)));
+        return ResponseEntity.ok(ApiResponse.ok(tripSharingService.getSharedTrip(shareToken)));
     }
 
     @Operation(summary = "Xuất lịch trình ra file PDF")

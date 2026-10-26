@@ -7,24 +7,18 @@ import com.tranbac.chiptripbe.common.config.AiProperties;
 import com.tranbac.chiptripbe.common.exception.AppException;
 import com.tranbac.chiptripbe.module.ai.dto.request.SuggestDestinationsRequest;
 import com.tranbac.chiptripbe.module.ai.dto.response.DestinationSuggestion;
-import com.tranbac.chiptripbe.module.ai.entity.AiUsage;
-import com.tranbac.chiptripbe.module.ai.repository.AiUsageRepository;
 import com.tranbac.chiptripbe.module.ai.service.AiKeyPool;
 import com.tranbac.chiptripbe.module.ai.service.AiSuggestService;
-import com.tranbac.chiptripbe.module.user.entity.User;
-import com.tranbac.chiptripbe.module.user.repository.UserRepository;
+import com.tranbac.chiptripbe.module.ai.service.AiUsageService;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientException;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -38,8 +32,7 @@ class AiSuggestServiceImpl implements AiSuggestService {
     private final WebClient.Builder webClientBuilder;
     private final AiProperties aiProperties;
     private final ObjectMapper objectMapper;
-    private final AiUsageRepository aiUsageRepository;
-    private final UserRepository userRepository;
+    private final AiUsageService aiUsageService;
     private final AiKeyPool aiKeyPool;
 
     private WebClient aiApiClient;
@@ -54,7 +47,6 @@ class AiSuggestServiceImpl implements AiSuggestService {
     }
 
     @Override
-    @Transactional
     public List<DestinationSuggestion> suggest(Long userId, SuggestDestinationsRequest request) {
         Map<String, Object> body = buildRequest(request);
         // Đủ lượt để xoay qua mọi key (khi quota) cộng thêm ngân sách retry cho lỗi tạm thời.
@@ -67,7 +59,9 @@ class AiSuggestServiceImpl implements AiSuggestService {
                 Map<String, Object> response = callLlm(body, apiKey);
                 String content = extractContent(response);
                 List<DestinationSuggestion> suggestions = parseAndValidate(content);
-                logUsage(userId, response);
+                // Record in a separate short transaction; never hold a DB transaction during provider HTTP/retries.
+                int[] tokens = extractTokenCount(response);
+                aiUsageService.recordUsage(userId, null, tokens[0], tokens[1]);
                 return suggestions;
 
             } catch (SuggestNonRetryableException e) {
@@ -228,25 +222,6 @@ class AiSuggestServiceImpl implements AiSuggestService {
             log.warn("Không parse được token count: {}", e.getMessage());
             return new int[]{0, 0};
         }
-    }
-
-    private void logUsage(Long userId, Map<String, Object> response) {
-        int[] tokens = extractTokenCount(response);
-        int promptTokens = tokens[0];
-        int completionTokens = tokens[1];
-        BigDecimal costUsd = BigDecimal.valueOf(
-                (double) promptTokens / 1_000_000 * aiProperties.getPricing().getInputUsdPer1m()
-                + (double) completionTokens / 1_000_000 * aiProperties.getPricing().getOutputUsdPer1m()
-        ).setScale(6, RoundingMode.HALF_UP);
-
-        User user = userRepository.getReferenceById(userId);
-        aiUsageRepository.save(AiUsage.builder()
-                .user(user)
-                .provider("gemini")
-                .tokensIn(promptTokens)
-                .tokensOut(completionTokens)
-                .costUsd(costUsd)
-                .build());
     }
 
     // ─── Internal exception types ───────────────────────────────────────────

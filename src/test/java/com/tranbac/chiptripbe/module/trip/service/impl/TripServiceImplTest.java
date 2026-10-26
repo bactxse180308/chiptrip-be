@@ -99,6 +99,7 @@ class TripServiceImplTest {
     @Mock private Executor backgroundEnrichmentExecutor;
 
     private TripServiceImpl service;
+    private TripSharingServiceImpl sharingService;
 
     @BeforeEach
     void runExecutorsSynchronously() {
@@ -122,7 +123,11 @@ class TripServiceImplTest {
                 tripGenerationPersistenceService,
                 messagingTemplate,
                 enrichmentExecutor,
-                backgroundEnrichmentExecutor);
+                backgroundEnrichmentExecutor,
+                new TripActivityViewMapper(objectMapper));
+        sharingService = new TripSharingServiceImpl(
+                tripRepository, tripDayRepository, activityRepository, placeCacheRepository,
+                new TripActivityViewMapper(objectMapper));
         doAnswer(inv -> {
             ((Runnable) inv.getArgument(0)).run();
             return null;
@@ -203,7 +208,7 @@ class TripServiceImplTest {
         Trip trip = privacyTrip();
         when(tripRepository.findById(77L)).thenReturn(Optional.of(trip));
         stubPrivacyItinerary(trip);
-        var json = tools.jackson.databind.json.JsonMapper.builder().build().valueToTree(service.getPublicTrip(77L));
+        var json = tools.jackson.databind.json.JsonMapper.builder().build().valueToTree(sharingService.getPublicTrip(77L));
         for (String key : List.of("shareToken", "members", "checklist", "dateStart", "dateEnd", "budgetVnd", "status")) {
             org.junit.jupiter.api.Assertions.assertFalse(json.has(key), "Public field leaked: " + key);
         }
@@ -221,7 +226,7 @@ class TripServiceImplTest {
         trip.setShareToken(token);
         stubPrivacyItinerary(trip);
         when(tripRepository.findByShareToken(token)).thenReturn(Optional.of(trip));
-        var json = tools.jackson.databind.json.JsonMapper.builder().build().valueToTree(service.getSharedTrip(token));
+        var json = tools.jackson.databind.json.JsonMapper.builder().build().valueToTree(sharingService.getSharedTrip(token));
         for (String key : List.of("shareToken", "members", "checklist")) {
             org.junit.jupiter.api.Assertions.assertFalse(json.has(key), "Shared field leaked: " + key);
         }
@@ -234,13 +239,13 @@ class TripServiceImplTest {
     void shareRotationAndRevocationRemainOwnerOnly() {
         Trip trip = privacyTrip();
         when(tripRepository.findById(77L)).thenReturn(Optional.of(trip));
-        assertThrows(AppException.class, () -> service.enableShare(2L, 77L));
-        String first = service.enableShare(USER_ID, 77L).getShareToken();
+        assertThrows(AppException.class, () -> sharingService.enableShare(2L, 77L));
+        String first = sharingService.enableShare(USER_ID, 77L).getShareToken();
         assertTrue(TripShareTokens.isCurrent(first));
-        String second = service.enableShare(USER_ID, 77L).getShareToken();
+        String second = sharingService.enableShare(USER_ID, 77L).getShareToken();
         org.junit.jupiter.api.Assertions.assertNotEquals(first, second);
         assertEquals(second, trip.getShareToken());
-        service.disableShare(USER_ID, 77L);
+        sharingService.disableShare(USER_ID, 77L);
         org.junit.jupiter.api.Assertions.assertNull(trip.getShareToken());
     }
 
@@ -250,7 +255,7 @@ class TripServiceImplTest {
         trip.setPublic(false);
         trip.setShareToken(TripShareTokens.create());
         when(tripRepository.findById(77L)).thenReturn(Optional.of(trip));
-        assertThrows(AppException.class, () -> service.getPublicTrip(77L));
+        assertThrows(AppException.class, () -> sharingService.getPublicTrip(77L));
         var owner = service.getTripDetail(USER_ID, 77L);
         assertEquals(trip.getShareToken(), owner.getShareToken());
         assertEquals(trip.getDateStart(), owner.getDateStart());
@@ -269,7 +274,7 @@ class TripServiceImplTest {
 
     @Test
     void legacyShareTokensAreRejectedWithoutDatabaseLookup() {
-        assertThrows(AppException.class, () -> service.getSharedTrip("0123456789abcdef0123456789abcdef"));
+        assertThrows(AppException.class, () -> sharingService.getSharedTrip("0123456789abcdef0123456789abcdef"));
         verify(tripRepository, never()).findByShareToken(anyString());
     }
 
